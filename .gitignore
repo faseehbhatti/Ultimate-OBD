@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------------------
+# Session data and personal vehicle information
+# ---------------------------------------------------------------------------
+# The app writes session logs here on shutdown. Those logs contain the VIN,
+# vehicle identity, COM port and every scan result, so they must never be
+# committed. Drive CSVs and PDF health reports can also contain VIN/codes.
+logs/
+*.log
+*.csv
+*.pdf
+
+# ---------------------------------------------------------------------------
+# Build output (generated, large, and machine-specific)
+# ---------------------------------------------------------------------------
+build/
+dist/
+
+# ---------------------------------------------------------------------------
+# Python bytecode / caches
+# ---------------------------------------------------------------------------
+# This project keeps bytecode in PyCache/ locally; never commit it.
+PyCache/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------------------------------------------------------------------------
+# Editors and OS junk
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---------------------------------------------------------------------------
+# Secrets and local overrides (none are used today, but keep the door shut)
+# ---------------------------------------------------------------------------
+.env
+.env.*
+secrets.*
+*.key
+*.pem
+*.p12
