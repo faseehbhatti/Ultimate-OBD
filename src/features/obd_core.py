@@ -54,8 +54,8 @@ COMMON_DTC_DESCRIPTIONS = {
 }
 
 # ---------- VIN / compatibility ----------
-# WMI (first 2-3 VIN chars) -> make. Built from vehicle_db (top-10 brands)
-# plus legacy extras. Extend WMIs in vehicle_db.py, not here.
+# WMI (first 2-3 VIN chars) -> make. Built from vehicle_db (make list)
+# plus common extras. Extend WMIs in vehicle_db.py, not here.
 
 WMI_MAKES: dict[str, str] = {}
 for _brand, _info in BRANDS.items():
@@ -80,6 +80,28 @@ YEAR_CODES = {
     "4": (2004, 2034), "5": (2005, 2035), "6": (2006, 2036), "7": (2007, 2037),
     "8": (2008, 2038), "9": (2009, 2039),
 }
+
+
+def vehicle_key(profile: dict) -> str:
+    """'make-model-year' lookup key for per-vehicle presets (lowercase, blanks skipped)."""
+    parts = [(profile.get("make") or "").lower(), (profile.get("model") or "").lower(),
+             str(profile.get("year") or "")]
+    return "-".join(x for x in parts if x)
+
+
+def generic_profile(make: str, year: int | None, *, vds: str = "", wmi: str = "",
+                    models: list[str] | None = None, model: str | None = None,
+                    note: str = "") -> dict:
+    """One profile shape for every car — no per-make special cases."""
+    return {
+        "make": make, "year": year, "vds": vds, "wmi": wmi,
+        "models": list(models or []), "model": model,
+        "mode": "generic",
+        "abs": "generic",
+        "abs_mode": "generic C-code scan (Modes 03/07/0A)",
+        "protocol": protocol_hint(year),
+        "note": note,
+    }
 
 
 def extract_vin_from_raw(raw: str) -> str | None:
@@ -149,8 +171,9 @@ def list_serial_ports() -> list[str]:
         return []
 
 class OBDClientCore:
-    # Sample VIN used in Demo mode (2018 Toyota Camry, Georgetown-built).
-    DEMO_VIN = "4T1B11HKXJU509123"
+    # Synthetic VIN used in Demo mode — structurally valid, assigned to no
+    # real manufacturer. Demo mode shows a neutral sample vehicle.
+    DEMO_VIN = "1DEM00000J0000000"
 
 
     def __init__(self, demo: bool = False):
@@ -243,7 +266,7 @@ class OBDClientCore:
         r = self.connection.query(obd.commands.VIN)
         if r.is_null():
             # Fallback: forced raw 0902 (bypasses the support filter), parsed
-            # as ISO-TP multi-frame — this is what older Toyotas need.
+            # as ISO-TP multi-frame — this is what some older ECUs require.
             raw = self.query_module("09 02")
             vin = extract_vin_from_raw(raw)
             if not vin:
@@ -263,64 +286,42 @@ class OBDClientCore:
     def detect_compatibility(self, vin: str | None = None, model: str | None = None) -> dict:
         """
         Connect-page routine: decode VIN -> set self.profile so the rest of the
-        app (ABS path, extras) adapts to the car. Make+year come from the VIN
-        (reliable); model is user-confirmed from the brand's top-10 list since
-        VIN VDS blocks aren't standardised. Never raises: unknown cars fall
-        back to the generic profile. The demo VIN is used ONLY in demo mode —
-        a real car with an unreadable VIN gets Unknown, never a fake identity.
+        app adapts to the car. Make+year come from the VIN (reliable); model is
+        user-confirmed from the make's model list since VIN VDS blocks aren't
+        standardised. Never raises: unknown cars fall back to the same generic
+        profile every make uses. The synthetic demo VIN is used ONLY in demo
+        mode — a real car with an unreadable VIN gets Unknown, never a fake identity.
         """
         vin = vin or self.vin
-        if not vin and self.demo:
-            vin = self.DEMO_VIN
+        if self.demo and (not vin or vin == self.DEMO_VIN):
+            self.vin = self.DEMO_VIN
+            self.profile = generic_profile(
+                "Demo", 2018, wmi="1DE", models=[], model="Sample car",
+                note="Demo mode — synthetic vehicle, no real car connected.")
+            return self.profile
         if not vin:
             self.vin = None
-            self.profile = {
-                "make": "Unknown", "year": None, "vds": "", "wmi": "",
-                "models": [], "model": None,
-                "mode": "generic",
-                "abs": "generic",
-                "abs_mode": "generic C-code scan (Modes 03/07/0A)",
-                "protocol": protocol_hint(None),
-                "extras": [],
-                "note": ("VIN unreadable on this car/adapter (Mode 09 PID 02 unsupported). "
-                         "Set make/model/year manually below — nothing was auto-detected."),
-            }
+            self.profile = generic_profile(
+                "Unknown", None,
+                note=("VIN unreadable on this car/adapter (Mode 09 PID 02 unsupported). "
+                      "Set make/model/year manually below — nothing was auto-detected."))
             return self.profile
         d = decode_vin(vin)
         self.vin = d["vin"]
         info = brand_info(d["make"])
-        if info is not None:
-            models = list(info["models"])
-            chosen = model if model in models else None
-            self.profile = {
-                "make": d["make"], "year": d["year"], "vds": d["vds"], "wmi": d["wmi"],
-                "models": models, "model": chosen,
-                "mode": "toyota" if d["make"] == "Toyota" else "generic",
-                "abs": info["abs"],
-                "abs_mode": ("Toyota ABS module (header 7B0) + generic fallback"
-                             if d["make"] == "Toyota" else "generic C-code scan (Modes 03/07/0A)"),
-                "protocol": protocol_hint(d["year"]),
-                "extras": (["ATF temp (Mode 21 PID 82, community-reported — verify scaling)"]
-                           if d["make"] == "Toyota" else []),
-                "note": info["notes"],
-            }
-        else:
-            self.profile = {
-                "make": d["make"], "year": d["year"], "vds": d["vds"], "wmi": d["wmi"],
-                "models": [], "model": None,
-                "mode": "generic",
-                "abs": "generic",
-                "abs_mode": "generic C-code scan (Modes 03/07/0A)",
-                "protocol": protocol_hint(d["year"]),
-                "extras": [],
-                "note": ("Generic profile: engine codes + I/M + live data fully supported; "
-                         "ABS via generic C-code scan."),
-            }
+        models = list(info["models"]) if info is not None else []
+        chosen = model if model in models else None
+        note = (info["notes"] if info is not None else
+                "Generic profile: engine codes + I/M + live data fully supported; "
+                "ABS via generic C-code scan.")
+        self.profile = generic_profile(d["make"], d["year"], vds=d["vds"],
+                                       wmi=d["wmi"], models=models, model=chosen,
+                                       note=note)
         return self.profile
 
 
     def set_model(self, model: str) -> dict:
-        """Confirm the model from the brand's top-10 list. Ignores unknown names."""
+        """Confirm the model from the make's model list. Ignores unknown names."""
         if model in self.profile.get("models", []):
             self.profile["model"] = model
         return self.profile
@@ -330,7 +331,7 @@ class OBDClientCore:
                            year: int | None = None) -> dict:
         """
         Manually identify the car (used when the VIN is unreadable).
-        make must be a brand in vehicle_db; model must be in its top-10 list;
+        make must be a brand in vehicle_db; model must be in its model list;
         year 1980-2039 or None. Raises ValueError on bad input. Keeps any
         already-read VIN for reference and marks the profile manual.
         """
@@ -343,20 +344,12 @@ class OBDClientCore:
                              f"Choices: {', '.join(info['models'])}")
         if year is not None and not (1980 <= int(year) <= datetime.date.today().year + 1):
             raise ValueError(f"Year '{year}' out of range 1980..{datetime.date.today().year + 1}")
-        self.profile = {
-            "make": make, "year": int(year) if year is not None else None,
-            "vds": self.profile.get("vds", "") if self.profile.get("make") == make else "",
-            "wmi": self.profile.get("wmi", "") if self.profile.get("make") == make else "",
-            "models": list(info["models"]), "model": model,
-            "mode": "toyota" if make == "Toyota" else "generic",
-            "abs": info["abs"],
-            "abs_mode": ("Toyota ABS module (header 7B0) + generic fallback"
-                         if make == "Toyota" else "generic C-code scan (Modes 03/07/0A)"),
-            "protocol": protocol_hint(int(year) if year is not None else None),
-            "extras": (["ATF temp (Mode 21 PID 82, community-reported — verify scaling)"]
-                       if make == "Toyota" else []),
-            "note": info["notes"] + " (Vehicle set manually — VIN unreadable.)",
-        }
+        self.profile = generic_profile(
+            make, int(year) if year is not None else None,
+            vds=self.profile.get("vds", "") if self.profile.get("make") == make else "",
+            wmi=self.profile.get("wmi", "") if self.profile.get("make") == make else "",
+            models=list(info["models"]), model=model,
+            note=info["notes"] + " (Vehicle set manually — VIN unreadable.)")
         return self.profile
 
 
@@ -449,7 +442,7 @@ class OBDClientCore:
     def query_abs_raw(self, cmd: str, tx_header: str | None = None) -> str:
         """
         ABS-named entry point for raw ECU queries, e.g.
-          query_abs_raw("19 02 FF", tx_header="7B0")
+          query_abs_raw("19 02 FF", tx_header="7E1")
         Delegates to query_module(); kept under this name because callers
         think in terms of the ABS module. Wrong headers just yield NO DATA,
         they don't harm the car.
@@ -478,7 +471,7 @@ class OBDClientCore:
         """
         Send a raw command to any ECU header using the library's per-command
         header support (set/restored automatically per query), e.g.
-          query_module("19 02 FF", tx_header="7B0")
+          query_module("19 02 FF", tx_header="7E1")
         You need your make/model's documented header + command.
         """
         if self.demo:
@@ -815,8 +808,8 @@ class OBDClientCore:
         {vin, cal_ids, cvns, note}. Never raises on bus errors.
         """
         if self.demo:
-            return {"vin": self.DEMO_VIN, "cal_ids": ["30384500", "8966300000"],
-                    "cvns": ["8F9A2B1C"],
+            return {"vin": self.DEMO_VIN, "cal_ids": ["DEMO-CALID-1", "DEMO-CALID-2"],
+                    "cvns": ["DEMO-CVN-1"],
                     "note": "demo values — compare CVN against stock to spot a tune"}
         if not self.is_connected():
             raise ConnectionError("Not connected. Call connect() first.")
@@ -892,7 +885,7 @@ def run_vin(client, args) -> int:
     else:
         client.detect_compatibility(model=args.model)
     if args.model and not client.profile.get("model"):
-        print(f"(model '{args.model}' not in top-10 list for "
+        print(f"(model '{args.model}' not in the model list for "
               f"{client.profile.get('make')}; use one of: "
               f"{', '.join(client.profile.get('models', []))})")
     print(client.profile_summary())

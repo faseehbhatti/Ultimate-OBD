@@ -42,8 +42,8 @@ def main(argv=None) -> int:
     ap.add_argument("--demo", action="store_true", help="Demo mode, no car needed.")
     ap.add_argument("--list-ports", action="store_true")
     ap.add_argument("--vin", action="store_true", help="Read VIN and show detected compatibility profile.")
-    ap.add_argument("--model", default=None, help="Confirm model from brand top-10 list, e.g. --model Corolla.")
-    ap.add_argument("--make", default=None, help="Manually set make when VIN is unreadable, e.g. --make Toyota.")
+    ap.add_argument("--model", default=None, help="Confirm model from the make's model list, e.g. --model Civic.")
+    ap.add_argument("--make", default=None, help="Manually set make when VIN is unreadable, e.g. --make Honda.")
     ap.add_argument("--year", type=int, default=None, help="Manually set model year, e.g. --year 2007.")
     ap.add_argument("--read", action="store_true", help="Read stored DTCs.")
     ap.add_argument("--clear", action="store_true", help="Clear DTCs / turn off MIL.")
@@ -61,7 +61,7 @@ def main(argv=None) -> int:
     ap.add_argument("--abs-probe", action="store_true",
                     help="Probe the ABS module header directly and show raw replies.")
     ap.add_argument("--atf", action="store_true",
-                    help="Toyota ATF temp via Mode 21 PID 82 (raw, scaling varies).")
+                    help="Transmission/ATF temperature via a verified per-vehicle raw PID.")
     ap.add_argument("--tpms-read", action="store_true", help="Read TPMS fault codes.")
     ap.add_argument("--tpms-live", action="store_true", help="Show live tire pressures (preset/unsupported info).")
     ap.add_argument("--tpms-raw", default=None,
@@ -69,7 +69,7 @@ def main(argv=None) -> int:
     ap.add_argument("--tpms-register", nargs=4, metavar=("FL", "FR", "RL", "RR"),
                     help="Manually set TPMS sensor IDs, e.g. --tpms-register 1A2B3C4 2B3C4D5 3C4D5E6 4D5E6F7.")
     ap.add_argument("--tx-header", default=None,
-                    help="Advanced: CAN header for --abs-raw, e.g. 7B0.")
+                    help="Advanced: CAN header for --abs-raw, e.g. 7E1.")
     ap.add_argument("--interval", type=float, default=1.0, help="Monitor poll interval in seconds (default 1.0).")
     ap.add_argument("--count", type=int, default=0, help="Monitor samples to take (0=infinite, Ctrl+C to stop).")
     ap.add_argument("--log", default=None, help="CSV file to log monitor samples, e.g. drive.csv.")

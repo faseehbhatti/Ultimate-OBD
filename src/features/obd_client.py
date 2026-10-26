@@ -8,7 +8,8 @@ Used by main.py (dispatcher) and gui.py."""
 
 from __future__ import annotations
 
-from features.abs_module import (ABS_DTC_DESCRIPTIONS, ABS_PRESETS, ABSMixin)
+from features.abs_module import (ABS_DTC_DESCRIPTIONS, ABS_PRESETS,
+                                  TRANSMISSION_PRESETS, ABSMixin)
 from features.im_readiness import IMReadinessMixin
 from features.obd_core import (COMMON_DTC_DESCRIPTIONS, DTC, OBDClientCore, decode_vin,
                                extract_vin_from_raw, list_serial_ports, to_float)
@@ -25,7 +26,8 @@ __all__ = [
     "OBDClient", "OBDClientCore", "DTC", "list_serial_ports", "to_float",
     "decode_vin", "extract_vin_from_raw", "COMMON_DTC_DESCRIPTIONS",
     "IMReadinessMixin", "ABSMixin", "TPMSMixin",
-    "ABS_DTC_DESCRIPTIONS", "ABS_PRESETS", "TPMS_DTC_DESCRIPTIONS",
+    "ABS_DTC_DESCRIPTIONS", "ABS_PRESETS", "TRANSMISSION_PRESETS",
+    "TPMS_DTC_DESCRIPTIONS",
     "TPMS_PRESETS", "TPMS_REGISTER_PRESETS", "parse_tpms_id",
     "BRANDS", "brand_info", "protocol_hint",
 ]

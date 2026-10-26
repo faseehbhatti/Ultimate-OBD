@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from features.obd_core import DTC
+from features.obd_core import DTC, vehicle_key
 
 # TPMS fault codes readable via generic Modes 03/07/0A on many cars.
 # Corners/sensor numbers vary by make — descriptions stay generic on purpose.
@@ -14,29 +14,29 @@ TPMS_DTC_DESCRIPTIONS = {
     "C0760": "Tire pressure sensor fault, rear axle (corner varies by make)",
     "C0765": "Tire pressure sensor fault (corner varies by make)",
     "C0775": "Tire pressure monitoring system fault",
-    "C2111": "TPMS transmitter ID not received (sensor varies; Toyota-family code)",
-    "C2112": "TPMS transmitter ID not received (sensor varies; Toyota-family code)",
-    "C2113": "TPMS transmitter ID not received (sensor varies; Toyota-family code)",
-    "C2114": "TPMS transmitter ID not received (sensor varies; Toyota-family code)",
-    "C2115": "TPMS transmitter ID not received (sensor varies; Toyota-family code)",
-    "B2872": "Tire pressure sensor fault (Ford-family code)",
+    "C2111": "TPMS transmitter ID not received (make-specific definition — check your service manual)",
+    "C2112": "TPMS transmitter ID not received (make-specific definition — check your service manual)",
+    "C2113": "TPMS transmitter ID not received (make-specific definition — check your service manual)",
+    "C2114": "TPMS transmitter ID not received (make-specific definition — check your service manual)",
+    "C2115": "TPMS transmitter ID not received (make-specific definition — check your service manual)",
+    "B2872": "Tire pressure sensor fault (body code — definition varies by make)",
 }
 TPMS_CODES = frozenset(TPMS_DTC_DESCRIPTIONS)
 
 # TPMS sensor-ID registration routines, keyed "make-model-year" (lowercase).
 # EMPTY ON PURPOSE: writing IDs uses undocumented per-model routines, and a
 # wrong routine can leave the TPMS ECU needing dealer recovery. Only add an
-# entry you have verified from a service manual or a captured Techstream
+# entry you have verified from a service manual or a captured brand-tool
 # session for that exact model/year. Documented shape:
 # TPMS_REGISTER_PRESETS = {
-#   "toyota-camry-2018": {
-#     "tx_header": "7B0",
+#   "example-make-example-model-2020": {
+#     "tx_header": "7E1",
 #     "session": "10 03",          # enter extended diagnostic session
-#     "write_tpl": "...",          # command template, {FL} {FR} {RL} {RR} = 7-hex-digit IDs
+#     "write_tpl": "...",          # command template, {FL} {FR} {RL} {RR} = sensor IDs
 #     "write_expect": "6E",        # expected positive-response prefix (spaces ignored, uppercase)
 #     "verify_tpl": "...",         # optional read-back command template (or None)
 #     "restore": "10 01",          # back to default session
-#     "source": "2018 Camry service manual, section ...",
+#     "source": "service manual, section ...",
 #   },
 # }
 TPMS_REGISTER_PRESETS: dict[str, dict] = {}
@@ -45,7 +45,7 @@ TPMS_REGISTER_PRESETS: dict[str, dict] = {}
 def parse_tpms_id(raw: str) -> str:
     """
     Validate/normalize one TPMS transmitter ID.
-    Toyota-family IDs are 7 hex digits (e.g. '1A2B3C4'); some makes use 8.
+    Some makes use 7 hex digits (e.g. '1A2B3C4'), others use 8.
     Returns uppercase ID without spaces. Raises ValueError naming the problem.
     """
     s = (raw or "").strip().upper().replace(" ", "").replace("-", "")
@@ -58,9 +58,10 @@ def parse_tpms_id(raw: str) -> str:
 
 # Live tire pressures have NO standard OBD-II PID — every make uses its own
 # Mode 22 / UDS address. Shape for future verified entries (do NOT guess):
-# TPMS_PRESETS = {"toyota-camry-2018": {"tx_header": "7B0", "pid": "XXXX",
+# TPMS_PRESETS = {"example-make-example-model-2020": {"tx_header": "7E1", "pid": "XXXX",
 #                 "decoder": "...", "source": "service manual / verified"}}
 TPMS_PRESETS: dict[str, dict] = {}
+
 
 class TPMSMixin:
     # ---------- TPMS ----------
@@ -71,10 +72,7 @@ class TPMSMixin:
     # brand tooling or the car's own relearn procedure (owner's manual).
     def _preset_key(self) -> str:
         """'make-model-year' lookup key for TPMS presets (lowercase, skips blanks)."""
-        p = self.profile
-        parts = [(p.get("make") or "").lower(), (p.get("model") or "").lower(),
-                 str(p.get("year") or "")]
-        return "-".join(x for x in parts if x)
+        return vehicle_key(self.profile)
 
     def read_tpms_dtcs(self) -> tuple[list[DTC], dict]:
         """Scan generic Modes 03/07/0A and keep known TPMS fault codes."""

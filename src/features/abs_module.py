@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from features.obd_core import COMMON_DTC_DESCRIPTIONS, DTC
+from features.obd_core import COMMON_DTC_DESCRIPTIONS, DTC, vehicle_key
 
 # Descriptions for common ABS/chassis (C0xxx) codes. Corner assignment
 # (FL/FR/RL/RR) varies by make — descriptions stay generic on purpose.
@@ -31,14 +31,14 @@ ABS_DTC_DESCRIPTIONS = {
     "C0710": "Steering Position Signal Malfunction",
     "C0800": "ABS Device Power Circuit Low/High",
     "U0121": "Lost Communication With ABS Control Module",
-    "C1201": "Engine Control System Malfunction (often set alongside ABS codes; Toyota)",
-    "C1210": "Yaw rate sensor zero point / circuit (Toyota) — calibration or sensor",
-    "C1223": "ABS Control System Malfunction (Toyota)",
-    "C1241": "Low Battery Positive Voltage to ABS ECU — check 12V battery/charging (Toyota)",
-    "C1246": "Master Cylinder Pressure Sensor Malfunction (Toyota)",
-    "C1310": "HV system malfunction reported in skid ECU — check hybrid system codes (Toyota hybrid)",
-    "C1336": "Zero point calibration undone, yaw/deceleration sensor (Toyota) — calibrate; common after battery disconnect",
-    "C1345": "Linear solenoid valve offset learning undone (Toyota) — perform learning procedure",
+    "C1201": "Engine Control System Malfunction (often set alongside ABS codes)",
+    "C1210": "Yaw Rate Sensor Zero Point / Circuit — calibration or sensor",
+    "C1223": "ABS Control System Malfunction",
+    "C1241": "Low Battery Positive Voltage to ABS ECU — check 12V battery/charging",
+    "C1246": "Master Cylinder Pressure Sensor Malfunction",
+    "C1310": "HV System Malfunction Reported in Skid ECU — check hybrid system codes",
+    "C1336": "Zero Point Calibration Undone, Yaw/Deceleration Sensor — calibrate; common after battery disconnect",
+    "C1345": "Linear Solenoid Valve Offset Learning Undone — perform learning procedure",
 }
 
 # UDS/KWP negative-response codes (NRC) for probe verdicts.
@@ -58,7 +58,7 @@ NRC_DESCRIPTIONS = {
 
 def decode_negative_response(reply: str) -> str | None:
     """
-    If reply is a single-frame negative response ('7B8 03 7F 03 11'),
+    If reply is a single-frame negative response ('7E9 03 7F 03 11'),
     return 'rejected Mode 03: service not supported'. Else None.
     Never raises.
     """
@@ -74,24 +74,33 @@ def decode_negative_response(reply: str) -> str | None:
         return None
 
 
-# Per-make starting points for talking to the ABS ECU directly.
+# Per-vehicle starting points for talking to the ABS ECU directly.
 # These are NOT guaranteed for your car: headers/PIDs differ by model/year.
-# How to fill in yours: Torque Pro extended-PID lists, service manual, or
-# sniff with `query_abs_raw()` below. Mode 19 02 = UDS "read DTCs by status".
-ABS_PRESETS: dict[str, dict] = {
-    # Toyota CAN: ABS ECU commonly reported at header 7B0 — but NOT universal.
-    # Proven on a 2007 Camry Hybrid: 7B0 is alive yet rejects 03 / 19 02 FF /
-    # 18 00 FF 00 (all 0x11 serviceNotSupported). Such cars need the Toyota
-    # routine or the DLC3 blink-code procedure (see README).
-    "toyota": {"tx_header": "7B0", "dtc_cmd": "03",
-               "atf_pid": "2182",
-               "note": "works on some CAN Toyotas; verified NOT to accept Mode 03 "
-                       "on a 2007 Camry Hybrid — verify on your model/year"},
-    # Example shape only — every value below the key is a placeholder:
-    # "mymake": {"tx_header": "7XX", ...},  (verify for your vehicle)
-    "generic-uds": {"tx_header": None, "dtc_cmd": "19 02 FF",
-                    "note": "UDS over current protocol header; works on some CAN cars"},
-}
+# How to fill in yours: service manual, extended-PID list, or sniff with
+# probe_abs_module(). Mode 19 02 = UDS "read DTCs by status".
+# Keyed "make-model-year" (lowercase), same as vehicle_key() in obd_core.
+# EMPTY ON PURPOSE — only add an entry you have verified for that vehicle.
+# Documented shape:
+# ABS_PRESETS = {
+#   "example-make-example-model-2020": {
+#       "tx_header": "7E1", "dtc_cmd": "19 02 FF",
+#       "source": "service manual / verified",
+#   },
+# }
+ABS_PRESETS: dict[str, dict] = {}
+
+
+# Manufacturer-specific live values (e.g. transmission/ATF temperature) have
+# no standard OBD-II PID. Keyed "make-model-year"; empty on purpose — a wrong
+# guess can decode garbage. Documented shape:
+# TRANSMISSION_PRESETS = {
+#   "example-make-example-model-2020": {
+#       "pid": "21A0", "tx_header": "7E1",
+#       "source": "service manual / verified",
+#   },
+# }
+TRANSMISSION_PRESETS: dict[str, dict] = {}
+
 
 class ABSMixin:
     # ---------- ABS (chassis) DTC read / clear ----------
@@ -154,12 +163,14 @@ class ABSMixin:
         _collect(obd.commands.FREEZE_DTC, "01-02-freeze")
         _collect(getattr(obd.commands, "PERMANENT_DTC", None), "0A-permanent")
 
-        # Toyota profile: additionally ask the ABS ECU directly (header 7B0).
-        if self.profile.get("mode") == "toyota":
-            for code in self._toyota_module_dtcs():
+        # Verified per-vehicle preset: additionally ask the ABS ECU directly.
+        preset = ABS_PRESETS.get(vehicle_key(self.profile))
+        if preset and preset.get("dtc_cmd"):
+            for code in self._module_dtcs(preset):
                 _add(code)
-                if "toyota-7B0" not in sources:
-                    sources.append("toyota-7B0")
+            tag = f"module-{preset.get('tx_header') or 'default'}"
+            if tag not in sources:
+                sources.append(tag)
 
         if not seen and not sources:
             note = ("ECU did not answer any generic mode — check ignition ON, "
@@ -170,27 +181,27 @@ class ABSMixin:
                     "ABS light on, the codes are almost certainly inside the ABS "
                     "module — run Probe Module and paste the raw replies.")
         else:
-            note = f"{len(seen)} ABS/chassis code(s) via generic OBD."
-        info = {"source": "generic Modes " + ("/".join(sources) if sources else "no response"),
+            note = f"{len(seen)} ABS/chassis code(s) reported by the ECU."
+        info = {"source": "OBD " + ("/".join(sources) if sources else "no response"),
                 "scanned": sources, "note": note}
         return list(seen.values()), info
 
 
-    def _toyota_module_dtcs(self) -> list[str]:
+    def _module_dtcs(self, preset: dict) -> list[str]:
         """
-        Ask the Toyota ABS ECU (header 7B0) for Mode 03 DTCs via the library's
-        own per-command header support. Community-reported for CAN Toyotas
-        (~2006+); returns [] on NO DATA / errors. Never raises.
+        Ask the ABS ECU for DTCs using a verified ABS_PRESETS entry for this
+        vehicle, via the library's own per-command header support. Returns []
+        on NO DATA / errors. Never raises.
         """
         try:
             import obd
             from obd.decoders import dtc as dtc_decoder
             from obd.protocols import ECU
             cmd = obd.OBDCommand(
-                "TOYOTA_ABS_DTC", "Toyota ABS DTC",
-                ABS_PRESETS["toyota"]["dtc_cmd"].replace(" ", "").encode(),
+                "ABS_MODULE_DTC", "ABS module DTC",
+                preset["dtc_cmd"].replace(" ", "").encode(),
                 0, dtc_decoder, ecu=ECU.ALL,
-                header=ABS_PRESETS["toyota"]["tx_header"].encode())
+                header=preset["tx_header"].encode())
             r = self.connection.query(cmd, force=True)
             if r.is_null():
                 return []
@@ -199,20 +210,32 @@ class ABSMixin:
             return []
 
 
-    def read_toyota_atf(self) -> dict:
-        """Toyota ATF temp: raw Mode 21 PID 82 reply (scaling varies by model)."""
+    def read_atf_temp(self) -> dict:
+        """
+        Manufacturer-specific transmission/ATF temperature (Mode 21/22 raw).
+
+        Only returned when a verified TRANSMISSION_PRESETS entry exists for
+        this vehicle. Scaling varies by model, so the raw reply is shown for
+        comparison with the dash/brand tool.
+        """
         if self.demo:
-            return {"supported": True, "raw": "21 82 -> 7E8 04 61 82 1A 0B (...)",
+            return {"supported": True, "raw": "21 A0 -> 7E8 04 61 A0 1A 0B (...)",
                     "demo_C": 78.5, "note": "demo value; verify scaling on a real car"}
         if not self.is_connected():
             raise ConnectionError("Not connected.")
+        preset = TRANSMISSION_PRESETS.get(vehicle_key(self.profile))
+        if not preset:
+            return {"supported": False,
+                    "note": ("No verified transmission-temperature preset for this "
+                             "vehicle. Add one to TRANSMISSION_PRESETS using your "
+                             "documented Mode 21/22 PID and header.")}
         try:
-            raw = self.query_module(ABS_PRESETS["toyota"]["atf_pid"])
+            raw = self.query_module(preset["pid"], tx_header=preset.get("tx_header"))
             return {"supported": True, "raw": raw,
-                    "note": "Raw 2182 response. Scaling varies by model — compare with "
-                            "dash/Techstream before trusting a conversion."}
+                    "note": "Raw response. Scaling varies by model — compare with "
+                            "the dash/brand tool before trusting a conversion."}
         except Exception as e:
-            return {"supported": False, "note": f"2182 unanswered ({e})"}
+            return {"supported": False, "note": f"Query failed ({e})"}
 
 
     def clear_abs(self) -> dict:
@@ -244,20 +267,21 @@ class ABSMixin:
         """
         Diagnostic probe: send ABS read commands straight at the module header
         and report verdicts — real data vs explicit rejection (7F…) vs silence.
-        The KWP2000 '18 00 FF 00' candidate is included because mid-2000s Toyota
-        ECUs often speak KWP2000 rather than UDS; all attempts are read-only.
-        Default header comes from the car profile (Toyota -> 7B0).
+        The KWP2000 '18 00 FF 00' candidate is included because mid-2000s ECUs
+        often speak KWP2000 rather than UDS; all attempts are read-only.
+        Default header comes from an ABS_PRESETS entry for this vehicle, else
+        7E1 (the usual second CAN diagnostic address).
         """
         if self.demo:
-            return {"header": header or "7B0", "answered": True,
-                    "attempts": [{"cmd": "03", "reply": "(demo) 7B8 06 43 02 C0 35 00 C0 11 00",
+            return {"header": header or "7E1", "answered": True,
+                    "attempts": [{"cmd": "03", "reply": "(demo) 7E9 06 43 02 C0 35 00 C0 11 00",
                                   "data": True}],
                     "note": "demo reply"}
         if not self.is_connected():
             return {"header": header or "?", "answered": False, "attempts": [],
                     "note": "Not connected."}
-        hdr = header or (ABS_PRESETS.get("toyota", {}).get("tx_header")
-                         if self.profile.get("mode") == "toyota" else None) or "7B0"
+        preset = ABS_PRESETS.get(vehicle_key(self.profile), {})
+        hdr = header or preset.get("tx_header") or "7E1"
         attempts: list[dict] = []
         answered = False
         for cmd in commands:
@@ -281,7 +305,7 @@ class ABSMixin:
         elif any("rejected" in a["verdict"] for a in attempts):
             note = (f"Module at {hdr} is ALIVE but rejects these services. It needs "
                     "its model-specific routine (often KWP2000-based on mid-2000s "
-                    "Toyotas) — paste this output plus your model/year for the next step.")
+                    "cars) — check the service manual for your model/year.")
         else:
             note = (f"Header {hdr} is silent on this car (all NO DATA). The ABS ECU "
                     "needs a different header/PID for this model/year — check the "
@@ -337,9 +361,9 @@ def run_abs(client, args) -> int:
         print("ABS clear sent." if res["ok"] else "ABS clear got no response.")
         print(res["warning"])
     if args.atf:
-        print("\nToyota ATF temp (Mode 21 PID 82, scaling varies by model):")
+        print("\nTransmission/ATF temperature (manufacturer-specific raw PID):")
         try:
-            t = client.read_toyota_atf()
+            t = client.read_atf_temp()
             print(f"  supported: {t.get('supported')}")
             if t.get("raw"):
                 print(f"  raw: {t['raw']}")

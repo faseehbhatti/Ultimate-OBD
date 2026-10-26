@@ -1,205 +1,140 @@
-# OBD-II Code Reader (Python + ELM327 Bluetooth)
+# Ultimate OBD — OBD-II Code Reader (Python + ELM327)
 
-Reads and clears engine fault codes via a Bluetooth ELM327 dongle.
+Read and clear fault codes, watch live data, and check emissions readiness on
+any OBD-II car (petrol 2001+ / diesel 2004+ in the EU/US). It works with a
+Bluetooth or USB ELM327 adapter and treats every make the same way: the
+standard OBD-II path is always available, and optional per-vehicle presets let
+you add manufacturer-specific data when you have a documented source.
 
-## Hardware
-- ELM327 Bluetooth Classic dongle (paired in Windows first)
-- Car with OBD-II port (all petrol 2001+/diesel 2004+ in EU/US), ignition ON
+## Startup and installation
 
-> iPhone users: iOS blocks Bluetooth Classic — use a BLE 4.0 or WiFi ELM327 instead
-> and use the Flutter/Web variant. This Python app targets Windows + Bluetooth Classic.
+### What you need
+- An ELM327 adapter (Bluetooth Classic or USB)
+- Any OBD-II car, ignition ON
+- Python 3.10+ on Windows (Tkinter is bundled with Python)
 
-## Setup
+> iPhone: iOS blocks Bluetooth Classic. Use a BLE or Wi-Fi ELM327 instead.
+> This app targets Windows with a Bluetooth Classic or USB adapter.
+
+### Install
 ```bat
 pip install -r requirements.txt
 ```
 
-## Find your COM port
+### Find the adapter
+Pair the dongle in Windows Bluetooth settings, then list the ports:
 ```bat
 py src/main.py --list-ports
 ```
-Pair the dongle in Windows Bluetooth settings first, then look in
-Device Manager > Ports (COM & LPT) for e.g. `Standard Serial over Bluetooth link (COM4)`
-— use the **outgoing** one. Common baud rates: 38400, 115200. In the GUI the
-port box offers **Auto** (library scans), the detected ports, or type one
-manually; `--port` omitted in the CLI also means auto.
+Use the **outgoing** COM port shown in Device Manager > Ports (COM & LPT),
+e.g. `COM4`. Common baud rates are 38400 and 115200; omit `--baud` to
+auto-detect.
 
-## Project layout
-```
-DefaultProject/
-  README.md
-  requirements.txt
-  PyCache/          <- Python bytecode cache (set PYTHONPYCACHEPREFIX=PyCache
-                       to keep .pyc files here instead of __pycache__ folders)
-  logs/             <- session logs, auto-saved on GUI shutdown as
-                       Make_Model_Year_YYYYMMDD_HHMMSS.log
-  src/
-    main.py         <- thin CLI dispatcher (run from root: py src/main.py ...)
-    gui.py          <- Tkinter GUI shell, pages, handlers (py src/gui.py ...)
-    ui/             <- visual layer (pure Tkinter/ttk, no extra dependencies)
-      theme.py          palette, fonts, ttk styles
-      widgets.py        cards, nav rail, gauges, trend charts, toggle, tables
-    features/       <- one module per function area, all executed from main.py
-      obd_core.py       connection, VIN/compatibility, engine DTCs, live data
-      im_readiness.py   I/M monitors
-      abs_module.py     ABS/chassis codes + probing
-      tpms_module.py    TPMS codes/pressures/registration
-      obd_client.py     facade composing OBDClient (used by the GUI)
-      vehicle_db.py     top-10 brands x top-10 models, WMI prefixes
-```
-All commands below run from the project root, e.g. `py src/main.py --demo --read`.
-
-## Try without a car (demo)
+### Run
 ```bat
-py src/main.py --demo --vin --read --abs-read
-py src/gui.py --demo
+py src/gui.py --demo      :: interface with no car connected
+py src/gui.py             :: connect to a real car
 ```
-Demo uses a sample 2018 Toyota VIN, so the Connect page shows the Toyota profile.
-
-## Real car — CLI
+CLI equivalents (run from the project root):
 ```bat
+py src/main.py --demo --read --im
 py src/main.py --port COM4 --read --im
-py src/main.py --port COM4 --live
-py src/main.py --port COM4 --monitor --interval 1 --count 60 --log drive.csv
-py src/main.py --port COM4 --clear
 ```
-`--im` shows I/M readiness (Mode 01 PID 01): READY / NOT READY per monitor.
-`--mode06` shows monitor test values vs limits (catches faults before codes set).
-`--freeze` shows the Mode 02 snapshot stored with the DTC.
-`--ecu-info` shows full Mode 09 (VIN, calibration IDs, CVNs — spot a remap).
-`--health` runs everything and writes a PDF report into `logs/`.
-`--monitor` streams live PIDs continuously, optional CSV log.
-`--clear` sends Mode 04 (clears codes + turns off check-engine light, resets I/M).
-If baud fails, retry: `--baud 38400` or `--baud 115200`.
+`--port` can be omitted to let the library scan for the adapter.
 
-## Connect page + compatibility (top-10 brands)
-On launch the app opens on **Connect**. Press **Connect & detect vehicle**: it
-reads the VIN (Mode 09 PID 02, standard on every car) and sets the reader
-profile — make, year, protocol hint, ABS path. Covered brands (WMI-based detect
-+ top-10 model picker on the Connect page, all OBD-II years via standard
-year-code decode):
-Toyota, Volkswagen, Ford, Honda, Nissan, Hyundai, GM, Kia, Mercedes, BMW
-(see `vehicle_db.py`). Other makes fall back to a working generic profile.
-The model is user-confirmed from the list — VIN VDS blocks aren't standardised,
-so the app never guesses it. If the VIN itself is unreadable (some cars/adapters
-reject Mode 09 PID 02), the app says Unknown and you set make/model/year
-manually on the Connect page (`--make/--model/--year` in CLI) — it never substitutes the
-demo identity on a real car. Toyota cars additionally get the 7B0 ABS-module
-attempt plus a raw Mode 21 PID 82 ATF-temp probe (scaling must be verified per
-model). `py src/main.py --port COM4 --vin [--model Corolla]` prints the same in CLI.
-
-## TPMS
-```bat
-py src/main.py --port COM4 --tpms-read
-py src/main.py --port COM4 --tpms-live
-```
-`--tpms-read` scans generic Modes 03/07/0A for known sensor/transmitter codes
-(C075x/C076x/C077x, C211x, B2872). Live per-corner pressures have no standard
-OBD-II PID, so `--tpms-live` only returns real data once your exact model's
-Mode 22/UDS address is added to `TPMS_PRESETS` (documented shape, no guessed
-entries) — otherwise it explains the options. `--tpms-raw "22 XXXX"
---tx-header <hdr>` queries with your documented values. Sensor registration /
-relearn always needs the car's own procedure (owner's manual) or brand tooling.
-Target pressures are on the door-jamb sticker, not in the app, since they vary
-by trim/load.
-
-## Manually set TPMS sensor IDs
-```bat
-py src/main.py --port COM4 --tpms-register 1A2B3C4 2B3C4D5 3C4D5E6 4D5E6F7
-```
-(Or the TPMS page → enter the 4 IDs → Register IDs.) IDs are 7–8 hex digits from the
-sensor bodies or scan-tool printout, must be unique per corner, ignition ON /
-engine OFF. The write runs only from a verified routine in
-`TPMS_REGISTER_PRESETS` for your exact make/model/year — with none present the
-app refuses and tells you what's needed instead of sending guessed bytes to an
-ECU. No verified routine ships yet (none is publicly documented for generic
-adapters), so on a real car today this validates your IDs and points at the
-next step: brand tooling or the model's documented routine.
-
-## Toyota ABS blink codes (pre-2010 models, e.g. 2007 Camry)
-When the ABS module rejects electronic reads (probe shows 0x11 rejections),
-Toyota's DLC3 jumper procedure still works — no scan tool needed:
-1. Ignition OFF. At the OBD port, jumper terminals **Tc (13) to CG (4)**
-   (a paperclip works; pin numbers are molded into the connector).
-2. Ignition ON, engine OFF. Count the ABS light blinks: 2-digit codes,
-   e.g. blink-blink-pause-blink = 21. Write down all codes shown.
-3. Commonly reported wheel-speed codes: 31/32/33/34 (one per corner —
-   confirm corner mapping in the service manual for your year).
-4. Clear (after repair): with the jumper in, press the brake pedal **8+ times
-   within 5 seconds** — light should switch to steady/blink-normal.
-This is the documented Toyota procedure for this era; the app's electronic
-ABS path remains for models whose module answers it.
-
-## ABS codes — CLI
-```bat
-py src/main.py --port COM4 --abs-read
-py src/main.py --port COM4 --abs-clear
-```
-`--abs-read` filters chassis (C-code) faults out of Modes 03/07/0A — this works
-on many cars, but some makes gate the ABS module behind a proprietary
-header/PID. `--abs-probe` shows exactly what the module says back
-(data / rejection / silence). For advanced use, `--abs-raw "19 02 FF"
---tx-header 7B0` (with your make's documented values) talks to the ABS ECU
-directly; see `ABS_PRESETS` in `src/features/abs_module.py`. `--atf` reads
-Toyota ATF temp raw (Mode 21 PID 82, scaling varies). `--abs-clear` uses
-Mode 04, which clears the ABS light
-on most cars — if the light stays on, the fault is still present or your
-make needs a dealer-level routine.
-
-## Real car — GUI
-```bat
-py src/gui.py
-```
-The window is a dark dashboard: a **navigation rail** on the left, a page header
-with the live connection pill (and a **DEMO** badge in demo mode), card-based
-content, and a docked **Session Log** pane at the bottom that you can resize by
-dragging the sash. All five pages are built at launch and reachable from the
-rail: **Connect** (COM port, Connect & detect, vehicle identity card with
-make/year/model pickers), **Engine** (fault codes, Mode 06, freeze frame, ECU
-info, health report, realtime gauges/charts + live PID table), **ABS**,
-**I/M Readiness**, and **TPMS**. The rail also shows the detected vehicle, VIN
-and protocol, and every action reports into the log pane.
-Connecting auto-detects the vehicle and jumps to the Engine page.
-On every shutdown the log is saved to `logs/` automatically, named
-`Make_Model_Year_YYYYMMDD_HHMMSS.log`
-(e.g. `Toyota_Camry_2007_20261001_143022.log`, `Unknown_…` when unset).
-Demo drive cycle: `py src/gui.py --demo` simulates idle → accelerate → cruise → decel
-so gauges/charts visibly move without a car.
-
-## Packaging (Windows .exe)
+### Build a Windows .exe (optional)
 ```bat
 pip install pyinstaller
 py -m PyInstaller OBDReader.spec
 ```
-Produces `dist/OBDReader-GUI.exe` (windowed) and `dist/OBDReader-CLI.exe`
-(console) — single files, no Python install needed on the target PC (~40 MB
-total: 22 MB GUI + 18 MB CLI). Notes:
-- Rebuild after any code change; `build/` is a regenerable cache (safe to delete).
-- The GUI exe writes its session logs to `logs/` next to the .exe (frozen-aware path).
-- Bluetooth pairing is still done in Windows Settings — the exe cannot pair for you.
-- First launch may be slow (one-file unpack) and Windows SmartScreen/antivirus
-  may flag the unsigned exe: unblock in file properties or sign it.
-- Verified: CLI exe runs all demo commands; GUI exe launches and stays up.
+This produces `dist/OBDReader-GUI.exe` and `dist/OBDReader-CLI.exe`. Rebuild
+after code changes; `build/` is a regenerable cache. The GUI writes session
+logs to `logs/` next to the executable.
 
-## Files
-- `src/main.py` — thin CLI dispatcher (parses args, connects, calls each module's `run_*`)
-- `src/features/obd_core.py` — connection, VIN/compatibility, engine DTCs, live data,
-  Mode 06, freeze frame, Mode 09
-- `src/features/health_report.py` — one-click PDF health report into `logs/`
-- `src/features/im_readiness.py` — I/M monitors
-- `src/features/abs_module.py` — ABS/chassis codes, probing
-- `src/features/tpms_module.py` — TPMS codes/pressures/registration
-- `src/features/obd_client.py` — facade composing `OBDClient` (used by the GUI)
-- `src/features/vehicle_db.py` — top-10 brands × top-10 models, WMI prefixes
-- `src/gui.py` — Tkinter GUI shell: sidebar navigation, page headers, feature pages,
-  handlers, and the worker→UI queue pump
-- `src/ui/theme.py` — design system: dark palette, fonts, ttk styles
-- `src/ui/widgets.py` — reusable widgets: `Card`, `NavItem`, `PageStack`, `Gauge`,
-  `TrendChart`, `Toggle`, striped table helpers
+### If it won't connect
+- **No COM ports** — the dongle isn't paired. Re-pair it and confirm you are
+  using the outgoing port.
+- **ELM Error / Not Connected** — wrong baud, wrong port, or ignition OFF.
+  Try `--baud 38400`, then `--baud 115200`, and reseat the dongle.
+- **No data** — protocol auto-detect failed. Try `--protocol 6` (CAN 11/500,
+  common on 2008+ cars) or check the fuse for the OBD socket.
 
-## Troubleshooting
-- `No COM ports`: dongle not paired — re-pair, check outgoing vs incoming port.
-- `ELM Error / Not Connected`: wrong baud, ignition OFF, or wrong COM port.
-  Try other baud rates, ignition ON (engine off), reseat dongle.
-- `No data`: protocol auto-detect failed — try `--protocol 6` (CAN 11/500, common
-  for 2008+ cars) or check fuse for OBD port.
+## How it works
+
+### Connect and identify
+The GUI opens on **Connect**. **Connect & detect vehicle** reads the VIN
+(Mode 09 PID 02, standard on every OBD-II car) and decodes make and year. The
+model is user-confirmed from the make's model list because VIN model blocks
+aren't standardised. If the VIN is unreadable, set make/model/year manually —
+the app never substitutes a fake identity. Makes outside the built-in list
+fall back to the same generic profile, so no car is locked out.
+
+### What the app reads
+- **Engine** — stored, pending and permanent DTCs (Modes 03/07/0A), MIL state,
+  freeze frame (Mode 02), Mode 06 monitor tests, and ECU calibration IDs/CVNs.
+- **Live data** — standard PIDs such as RPM, speed, coolant, load, fuel trims,
+  MAF, fuel level and voltage. Gauges and charts live on the Engine page; the
+  CLI can stream samples to CSV.
+- **I/M readiness** — which emissions monitors have completed since the last
+  code clear (Mode 01 PID 01).
+- **ABS/chassis** — C-codes exposed through the generic modes, plus a module
+  probe that reports raw replies: data, explicit rejection, or silence.
+- **TPMS** — known TPMS fault codes from the generic modes. Live per-corner
+  pressures and sensor-ID registration have no standard OBD-II PID, so they
+  only run from a verified per-vehicle preset.
+- **Health report** — a PDF summary written to `logs/`.
+
+### Generic first, presets for the rest
+Everything standardised — engine codes, live PIDs, readiness, freeze frame,
+Mode 06 and Mode 09 — works on every car. Anything manufacturer-specific —
+ABS module access, live TPMS pressures, transmission temperature — needs a
+documented header/PID for the exact make/model/year. Those live in empty
+preset tables (`ABS_PRESETS`, `TRANSMISSION_PRESETS`, `TPMS_PRESETS`,
+`TPMS_REGISTER_PRESETS`), so the app never sends guessed bytes to an ECU.
+Add an entry only when you have a service-manual or captured-tool source.
+
+### CLI reference
+| Command | What it does |
+| --- | --- |
+| `--read` / `--clear` | Read stored engine codes / clear codes and the MIL |
+| `--live` / `--monitor` | One live-data snapshot / continuous streaming |
+| `--monitor --log drive.csv` | Stream live data and log it to CSV |
+| `--im` | I/M readiness monitors |
+| `--mode06` / `--freeze` / `--ecu-info` | Monitor tests / freeze frame / Mode 09 |
+| `--health` | Full PDF health report into `logs/` |
+| `--abs-read` / `--abs-probe` / `--abs-clear` | ABS C-codes / raw probe / ABS clear |
+| `--abs-raw "19 02 FF" --tx-header 7E1` | Send a documented raw module query |
+| `--tpms-read` / `--tpms-live` / `--tpms-raw` | TPMS codes / pressures / raw query |
+| `--tpms-register FL FR RL RR` | Write four sensor IDs (preset required) |
+| `--atf` | Transmission temperature (preset required) |
+| `--vin [--make X --model Y --year N]` | Detect or set the vehicle profile |
+
+`--clear` and `--abs-clear` send Mode 04, which also resets I/M readiness to
+NOT READY. Fix or record the fault first.
+
+### Files and layout
+```
+Ultimate-OBD/
+  README.md
+  requirements.txt
+  OBDReader.spec        PyInstaller build definition
+  logs/                 session logs and PDF health reports
+  src/
+    main.py             CLI dispatcher
+    gui.py              Tkinter GUI shell and page handlers
+    ui/                 theme and reusable widgets
+    features/
+      obd_core.py       connection, VIN/profile, engine DTCs, live data
+      im_readiness.py   I/M monitors
+      abs_module.py     ABS codes, probe, per-vehicle presets
+      tpms_module.py    TPMS codes, pressures, sensor registration
+      health_report.py  PDF report
+      obd_client.py     facade composing the client used by the GUI
+      vehicle_db.py     make/model list and WMI prefixes
+```
+
+### Logs
+The GUI saves the session log automatically on shutdown as
+`Make_Model_Year_YYYYMMDD_HHMMSS.log` (e.g. `Honda_Civic_2007_20261001_143022.log`;
+`Unknown_*` when the vehicle is unset). Demo mode simulates idle, acceleration,
+cruise and deceleration, so gauges and charts move without a car.

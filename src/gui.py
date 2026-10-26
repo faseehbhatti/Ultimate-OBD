@@ -573,14 +573,15 @@ class App(tk.Tk):
                   width=10).pack(side="left", anchor="n")
             label(row, text, size=8, fg=MUTED, bg=SURFACE, wraplength=290).pack(
                 side="left", fill="x", expand=True)
-        label(guide.body, "Pre-2010 Toyotas: if everything is refused, use the "
-                          "DLC3 blink procedure (README).",
+        label(guide.body, "Older vehicles: if every service is refused, many makes "
+                          "offer a blink-code/jumper procedure at the diagnostic "
+                          "connector — see your service manual.",
               size=8, fg=FAINT, bg=SURFACE, wraplength=320).pack(
                   fill="x", pady=(6, 0))
 
         advanced = Card(right, padding=8)
         advanced.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
-        label(advanced.body, "RAW QUERY · 7B0 / 19 02 FF", size=7, weight="bold",
+        label(advanced.body, "RAW QUERY · HEADER + COMMAND", size=7, weight="bold",
               fg=FAINT, bg=SURFACE).pack(fill="x", pady=(0, 6))
         fields = tk.Frame(advanced.body, bg=SURFACE)
         fields.pack(fill="x")
@@ -803,7 +804,7 @@ class App(tk.Tk):
         return d
 
     def log_filename(self, when: datetime | None = None) -> str:
-        """E.g. Toyota_Camry_2007_20261001_143022.log (Unknown_* when unset)."""
+        """E.g. Honda_Civic_2007_20261001_143022.log (Unknown_* when unset)."""
         p = self.client.profile
         when = when or datetime.now()
         return (f"{self._slug(p.get('make'))}_{self._slug(p.get('model'), 'NoModel')}_"
