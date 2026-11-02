@@ -1,9 +1,7 @@
 """Tkinter GUI for the OBD-II reader.
 
-Visual shell: a dark navigation rail (Connect / Engine / ABS / I/M / TPMS), a
-page header with connection state, card-based content, and a resizable Session
-Log docked at the bottom. Threading rule: workers never call Tk — they enqueue
-callables drained by the UI-thread pump.
+Pages: Connect / Engine / ABS / I/M / TPMS, with a session-log dock.
+Workers never call Tk — they enqueue callables drained by the UI-thread pump.
 
 Run from the project root:  py src/gui.py  (or  py src/gui.py --demo)
 """
@@ -11,6 +9,7 @@ Run from the project root:  py src/gui.py  (or  py src/gui.py --demo)
 from __future__ import annotations
 
 import collections
+import ctypes
 import queue
 import re
 import sys
@@ -23,24 +22,58 @@ from tkinter import filedialog, messagebox, ttk
 
 from features.obd_client import OBDClient, list_serial_ports, to_float
 from features.vehicle_db import BRANDS, brand_info
-from ui.theme import (ACCENT, ACCENT_DIM, AMBER, BG, BLUE, BORDER, FAINT,
-                      FIELD, FONT, GREEN, MONO, MUTED, RED, SIDEBAR,
-                      STATUS_COLORS, SURFACE, SURFACE_2, SURFACE_3, TEXT,
-                      apply_theme, chip, divider, label)
-from ui.widgets import (Card, Gauge, NavItem, PageStack, Toggle, TrendChart,
-                        fill_tree, style_tree)
+from ui.theme import (ACCENT, ACCENT_RICH, ACCENT_WASH, AMBER, BG, BORDER,
+                      DANGER_TEXT, DISPLAY_FONT, FAINT, FIELD, GREEN,
+                      HEADLINE_FONT, INK, LIVE, LIVE_PALE, LIVE_TEXT, MONO,
+                      MUTED, MUTE_DEEP, RED, SIDEBAR, STATUS_COLORS, SURFACE,
+                      SURFACE_2, TEXT, TYPE, WORDMARK_FONT, apply_theme,
+                      divider, label, mono_font, seam, tag)
+from ui.widgets import (Card, Gauge, Mark, NavItem, PageStack, ScrollArea,
+                        StatusDot, Toggle, Tracked, TrendChart, fill_tree,
+                        style_tree)
+
+
+def micro(parent, text: str, *, bg: str = SURFACE, fg: str = FAINT,
+          tracking: float = 2.2, weight: str = "bold") -> Tracked:
+    """Tracked mono micro label — the system's label voice."""
+    return Tracked(parent, text, size=TYPE["micro"], weight=weight, family=MONO,
+                   fg=fg, bg=bg, tracking=tracking)
+
+
+def eyebrow(parent, text: str, *, bg: str = SURFACE,
+            fg: str = MUTED) -> Tracked:
+    """Small mono eyebrow above a title (tracking 0.18em)."""
+    return Tracked(parent, text.upper(), size=TYPE["micro"], weight="normal",
+                   family=MONO, fg=fg, bg=bg, tracking=2.0)
+
+
+def _enable_dpi_awareness() -> None:
+    """Render at real pixels instead of letting Windows bitmap-scale the app."""
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+_enable_dpi_awareness()
 
 
 class App(tk.Tk):
     def __init__(self, demo_default=False):
         super().__init__()
-        self.title("OBD Reader — Diagnostics")
-        screen_h = self.winfo_screenheight()
-        width, height = 1240, min(900, max(720, screen_h - 90))
-        x = max(0, (self.winfo_screenwidth() - width) // 2)
+        self.title("Ultimate OBD — Diagnostics")
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        width = min(1280, max(1000, screen_w - 80))
+        height = min(920, max(680, screen_h - 100))
+        x = max(0, (screen_w - width) // 2)
         y = max(0, (screen_h - height) // 2 - 20)
         self.geometry(f"{width}x{height}+{x}+{y}")
-        self.minsize(1040, 720)
+        self.minsize(min(1180, width), min(720, height))
 
         self.client = OBDClient(demo=demo_default)
         self._mon_stop: threading.Event | None = None
@@ -66,101 +99,122 @@ class App(tk.Tk):
         self.refresh_ports()
         self._refresh_vehicle()
         self._refresh_demo_badge()
+        self._light_titlebar()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind_all("<MouseWheel>", self._on_wheel, add="+")
         self.after(100, self._pump_calls)
+
+    def _light_titlebar(self) -> None:
+        """Match the Windows chrome to the paper ground (best effort)."""
+        if sys.platform != "win32":
+            return
+        try:
+            self.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            off = ctypes.c_int(0)
+            for attr in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(off), ctypes.sizeof(off))
+            caption = ctypes.c_int(0x00FFFFFF)  # COLORREF white
+            text = ctypes.c_int(0x00000000)     # COLORREF black
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 35, ctypes.byref(caption), ctypes.sizeof(caption))
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 36, ctypes.byref(text), ctypes.sizeof(text))
+        except Exception:
+            pass
 
     # ================= shell =================
     def _build_shell(self):
         """Sidebar + header + page stack + log pane. Pages are added later."""
-        self.side = tk.Frame(self, bg=SIDEBAR, width=232)
+        self.side = tk.Frame(self, bg=SIDEBAR, width=256)
         self.side.pack(side="left", fill="y")
         self.side.pack_propagate(False)
+        tk.Frame(self.side, bg=BORDER, width=1).pack(side="right", fill="y")
         self._build_sidebar()
 
         main = tk.Frame(self, bg=BG)
         main.pack(side="left", fill="both", expand=True)
 
-        header = tk.Frame(main, bg=BG, padx=22, pady=14)
+        header = tk.Frame(main, bg=BG, padx=28, pady=20)
         header.pack(fill="x")
         titles = tk.Frame(header, bg=BG)
         titles.pack(side="left", fill="x", expand=True)
+        self.eyebrow_var = tk.StringVar(value="01 / CONNECT")
+        self.eyebrow = Tracked(titles, "01 / CONNECT", size=TYPE["micro"],
+                               weight="normal", family=MONO, fg=ACCENT,
+                               bg=BG, tracking=2.2)
+        self.eyebrow.pack(anchor="w", pady=(0, 4))
         self.page_title_var = tk.StringVar(value="Connect")
         self.page_sub_var = tk.StringVar(value="")
-        label(titles, "", size=17, weight="bold", bg=BG,
-              family="Segoe UI Semibold",
+        label(titles, "", size=TYPE["headline"], bg=BG, fg=INK,
+              family=HEADLINE_FONT,
               textvariable=self.page_title_var).pack(anchor="w")
-        label(titles, "", size=9, fg=MUTED, bg=BG,
+        label(titles, "", size=TYPE["small"], fg=MUTED, bg=BG,
               textvariable=self.page_sub_var).pack(anchor="w", pady=(2, 0))
 
         right = tk.Frame(header, bg=BG)
         right.pack(side="right")
-        self.demo_badge = tk.Label(right, text="DEMO", font=(FONT, 7, "bold"),
-                                   fg=ACCENT, bg=ACCENT_DIM, padx=8, pady=4,
-                                   bd=0, highlightthickness=0)
+        self.demo_badge = tag(right, "DEMO MODE", kind="accent")
         pill = tk.Frame(right, bg=SURFACE_2, highlightbackground=BORDER,
                         highlightthickness=1, bd=0)
         pill.pack(side="right")
-        self.conn_label = tk.Label(pill, text="● Disconnected", font=(FONT, 9, "bold"),
-                                   fg=RED, bg=SURFACE_2, padx=12, pady=6,
-                                   bd=0, highlightthickness=0)
-        self.conn_label.pack()
+        self.conn_dot = StatusDot(pill, bg=SURFACE_2)
+        self.conn_dot.pack(side="left", padx=(12, 7), pady=8)
+        self.conn_label = tk.Label(pill, text="Disconnected",
+                                   font=mono_font(TYPE["micro"], "bold"),
+                                   fg=DANGER_TEXT, bg=SURFACE_2,
+                                   padx=0, pady=7, bd=0, highlightthickness=0)
+        self.conn_label.pack(side="left", padx=(0, 13))
 
-        divider(main).pack(fill="x", padx=22)
+        rule = tk.Frame(main, bg=BG, padx=28)
+        rule.pack(fill="x")
+        seam(rule, width=64).pack(side="left")
+        divider(rule).pack(side="left", fill="x", expand=True)
 
-        self.pw = tk.PanedWindow(main, orient="vertical", bg=BG, sashwidth=6,
+        self.pw = tk.PanedWindow(main, orient="vertical", bg=BG, sashwidth=8,
                                  bd=0, sashrelief="flat")
-        self.pw.pack(fill="both", expand=True, padx=16, pady=(10, 14))
+        self.pw.pack(fill="both", expand=True, padx=20, pady=(12, 16))
         self.stack = PageStack(self.pw, on_select=self._on_page_change)
-        self.pw.add(self.stack, minsize=400, stretch="always")
+        self.pw.add(self.stack, minsize=420, stretch="always")
         self._build_log_panel()
 
     def _build_sidebar(self):
-        brand = tk.Frame(self.side, bg=SIDEBAR, padx=20, pady=20)
+        brand = tk.Frame(self.side, bg=SIDEBAR, padx=22, pady=22)
         brand.pack(fill="x")
-        logo = tk.Canvas(brand, width=32, height=32, bg=SIDEBAR,
-                         highlightthickness=0, bd=0)
-        logo.pack(side="left")
-        logo.create_arc(4, 4, 28, 28, start=205, extent=130, style="arc",
-                        outline=ACCENT, width=2)
-        logo.create_line(16, 16, 23, 10, fill=ACCENT, width=2)
-        logo.create_oval(14, 14, 18, 18, fill=ACCENT, outline="")
+        Mark(brand, size=28, bg=SIDEBAR).pack(side="left")
         names = tk.Frame(brand, bg=SIDEBAR)
-        names.pack(side="left", padx=(10, 0))
-        label(names, "OBD Reader", size=12, weight="bold", bg=SIDEBAR,
-              family="Segoe UI Semibold").pack(anchor="w")
-        label(names, "DIAGNOSTICS SUITE", size=6, weight="bold", fg=FAINT,
-              bg=SIDEBAR).pack(anchor="w")
+        names.pack(side="left", padx=(12, 0))
+        Tracked(names, "ULTIMATE OBD", size=TYPE["wordmark"], weight="normal",
+                family=WORDMARK_FONT, fg=INK, bg=SIDEBAR,
+                tracking=2.6).pack(anchor="w")
 
         self.nav_area = tk.Frame(self.side, bg=SIDEBAR)
         self.nav_area.pack(fill="x")
 
-        card = Card(self.side, padding=12)
+        card = Card(self.side, padding=14, seam=True)
         card.pack(side="bottom", fill="x", padx=14, pady=16)
-        label(card.body, "VEHICLE", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x")
+        micro(card.body, "VEHICLE").pack(fill="x")
         self.side_vehicle_var = tk.StringVar(value="No vehicle detected")
         self.side_vin_var = tk.StringVar(value="VIN —")
         self.side_proto_var = tk.StringVar(value="Protocol —")
-        label(card.body, "", size=9, weight="bold", bg=SURFACE,
-              textvariable=self.side_vehicle_var, wraplength=176).pack(
-                  fill="x", pady=(4, 3))
-        label(card.body, "", size=8, fg=MUTED, bg=SURFACE, family="Consolas",
-              textvariable=self.side_vin_var, wraplength=176).pack(fill="x")
-        label(card.body, "", size=7, fg=FAINT, bg=SURFACE,
-              textvariable=self.side_proto_var, wraplength=176).pack(
-                  fill="x", pady=(3, 0))
-        label(card.body, "Session logs auto-save to logs/", size=7, fg=FAINT,
-              bg=SURFACE).pack(fill="x", pady=(8, 0))
+        label(card.body, "", size=TYPE["small"], weight="bold", fg=INK,
+              bg=SURFACE, textvariable=self.side_vehicle_var,
+              wraplength=196).pack(fill="x", pady=(5, 4))
+        label(card.body, "", size=TYPE["micro"], fg=MUTED, bg=SURFACE,
+              family=MONO, textvariable=self.side_vin_var,
+              wraplength=196).pack(fill="x")
+        label(card.body, "", size=10, fg=FAINT, bg=SURFACE,
+              textvariable=self.side_proto_var,
+              wraplength=196).pack(fill="x", pady=(4, 0))
 
     def _build_nav(self):
-        label(self.nav_area, "WORKSPACE", size=7, weight="bold", fg=FAINT,
-              bg=SIDEBAR).pack(fill="x", padx=20, pady=(16, 6))
         entries = [
-            (self.tab_connect, "⌂", "Connect"),
-            (self.tab_obd, "◎", "Engine"),
-            (self.tab_abs, "◈", "ABS"),
-            (self.tab_im, "✓", "I/M Readiness"),
-            (self.tab_tpms, "◍", "TPMS"),
+            (self.tab_connect, "connect", "Connect"),
+            (self.tab_obd, "engine", "Engine"),
+            (self.tab_abs, "abs", "ABS"),
+            (self.tab_im, "readiness", "I/M Readiness"),
+            (self.tab_tpms, "tpms", "TPMS"),
         ]
         for page, icon, title in entries:
             item = NavItem(self.nav_area, icon, title,
@@ -172,10 +226,9 @@ class App(tk.Tk):
         wrap = tk.Frame(self.pw, bg=BG)
         card = Card(wrap, padding=0)
         card.pack(fill="both", expand=True)
-        head = tk.Frame(card.body, bg=SURFACE, padx=14, pady=8)
+        head = tk.Frame(card.body, bg=SURFACE, padx=16, pady=9)
         head.pack(fill="x")
-        label(head, "SESSION LOG", size=8, weight="bold", fg=MUTED,
-              bg=SURFACE).pack(side="left")
+        micro(head, "SESSION LOG", fg=MUTED).pack(side="left")
         for text, command in (("Open folder", self.on_open_logs),
                               ("Save now", self.on_save_log),
                               ("Clear", self.on_clear_log)):
@@ -183,35 +236,59 @@ class App(tk.Tk):
                        command=command).pack(side="right", padx=(6, 0))
         body = tk.Frame(card.body, bg=FIELD)
         body.pack(fill="both", expand=True)
-        self.log = tk.Text(body, bg=FIELD, fg="#c3d1df", insertbackground=ACCENT,
-                           selectbackground=ACCENT_DIM, selectforeground=TEXT,
+        self.log = tk.Text(body, bg=FIELD, fg=MUTED, insertbackground=ACCENT,
+                           selectbackground=ACCENT_WASH, selectforeground=INK,
                            relief="flat", bd=0, highlightthickness=0,
-                           wrap="word", font=(MONO, 9), padx=14, pady=8,
-                           height=6)
+                           wrap="word", font=mono_font(TYPE["mono_lg"]),
+                           padx=16, pady=10, height=6)
+        self.log.tag_configure("err", foreground=DANGER_TEXT)
+        self.log.tag_configure("ok", foreground=LIVE_TEXT)
+        self.log.tag_configure("dim", foreground=FAINT)
         scroll = ttk.Scrollbar(body, orient="vertical",
                                command=self.log.yview,
                                style="Slim.Vertical.TScrollbar")
         self.log.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.log.pack(side="left", fill="both", expand=True)
-        self.pw.add(wrap, minsize=96, height=140, stretch="never")
-        self.log.insert("end", "Diagnostic log — every action reports here.\n"
-                               "Drag the sash above this panel to resize it.\n"
-                               "This log is saved to logs/ automatically when the app closes.\n\n")
+        self.pw.add(wrap, minsize=96, height=150, stretch="never")
+        self.log.insert("end", "Log — saves to logs/ on exit.\n\n", "dim")
+        self.log.see("1.0")
 
     # ================= navigation / header =================
+    def _page(self, title: str, subtitle: str = ""):
+        """Create a scrollable page; returns (stack host, grid body)."""
+        host = ScrollArea(self.stack, bg=BG)
+        self.stack.add(host, title, subtitle)
+        return host, host.body
+
     def _select_page(self, page: tk.Widget):
         self.stack.select(page)
+
+    def _on_wheel(self, event):
+        """Route the wheel to the visible page when its content overflows."""
+        host = self.stack.select()
+        if not isinstance(host, ScrollArea) or not host.scrollable:
+            return
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        while widget is not None and widget is not host:
+            widget = widget.master
+        if widget is None:
+            return
+        step = -1 if event.delta > 0 else 1
+        host.canvas.yview_scroll(step * 3, "units")
 
     def _on_page_change(self, page: tk.Widget, title: str, subtitle: str):
         self.page_title_var.set(title)
         self.page_sub_var.set(subtitle)
+        pages = list(self.nav_items)
+        index = pages.index(page) + 1 if page in pages else 0
+        self.eyebrow.set(f"{index:02d} / {title.upper()}")
         for candidate, item in self.nav_items.items():
             item.set_active(candidate is page)
 
     def _refresh_demo_badge(self):
         if self.demo_var.get():
-            self.demo_badge.pack(side="right", padx=(0, 8))
+            self.demo_badge.pack(side="right", padx=(0, 10))
         else:
             self.demo_badge.pack_forget()
 
@@ -239,12 +316,20 @@ class App(tk.Tk):
         self.call_ui(lambda: self._write(s))
 
     def _write(self, s: str):
-        self.log.insert("end", s)
+        if "FAILED" in s or "FAIL" in s:
+            self.log.insert("end", s, "err")
+        elif "saved" in s.lower() or "Connected" in s or "clear sent" in s.lower():
+            self.log.insert("end", s, "ok")
+        else:
+            self.log.insert("end", s)
         self.log.see("end")
 
     def _set_conn_label(self, text: str, color: str):
-        self.call_ui(lambda: self.conn_label.config(
-            text=text, fg=STATUS_COLORS.get(color, TEXT)))
+        def apply():
+            hue = STATUS_COLORS.get(color, TEXT)
+            self.conn_label.config(text=text, fg=hue)
+            self.conn_dot.set(hue, glow=(color == "green"))
+        self.call_ui(apply)
 
     def _show_features(self):
         """Jump to the Engine page after a successful connection."""
@@ -252,116 +337,97 @@ class App(tk.Tk):
 
     # ================= Connect page =================
     def _build_connect_tab(self):
-        page = tk.Frame(self.stack, bg=BG)
-        self.tab_connect = page
-        self.stack.add(page, "Connect", "Pair your adapter, then let the app identify the car.")
-        page.grid_columnconfigure(0, weight=2, uniform="cols")
-        page.grid_columnconfigure(1, weight=3, uniform="cols")
-        page.grid_rowconfigure(2, weight=1)
+        host, page = self._page("Connect")
+        self.tab_connect = host
+        page.grid_columnconfigure(0, weight=2)
+        page.grid_columnconfigure(1, weight=3)
+        page.grid_rowconfigure(1, weight=1)
 
-        ready = Card(page, padding=14)
+        ready = Card(page, padding=18, seam=True)
         ready.grid(row=0, column=0, columnspan=2, sticky="ew")
         rrow = tk.Frame(ready.body, bg=SURFACE)
         rrow.pack(fill="x")
-        head = tk.Frame(rrow, bg=SURFACE)
-        head.pack(side="left")
-        label(head, "READY TO SCAN", size=7, weight="bold", fg=ACCENT,
-              bg=SURFACE).pack(anchor="w")
-        label(head, "Ready when you are.", size=14, weight="bold",
-              bg=SURFACE, family="Segoe UI Semibold").pack(anchor="w", pady=(1, 0))
-        steps = tk.Frame(rrow, bg=SURFACE)
-        steps.pack(side="right")
-        for text in ("1  Pair the adapter", "2  Select the port", "3  Connect & detect"):
-            chip(steps, text).pack(side="left", padx=(6, 0))
+        micro(rrow, "READY TO SCAN", fg=ACCENT, tracking=2.4).pack(side="left")
+        label(rrow, "Ignition ON · engine running for live data",
+              size=TYPE["small"], fg=MUTED, bg=SURFACE).pack(side="right")
 
         # -- connection settings ------------------------------------------
-        settings = Card(page, padding=16)
+        settings = Card(page, padding=18)
         settings.grid(row=1, column=0, sticky="nsew", pady=(12, 0), padx=(0, 6))
-        label(settings.body, "CONNECTION", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x")
-        label(settings.body, "Adapter link", size=12, weight="bold",
-              bg=SURFACE).pack(fill="x", pady=(1, 0))
-        label(settings.body, "Serial port the ELM327 exposed after pairing.",
-              size=8, fg=MUTED, bg=SURFACE).pack(fill="x", pady=(1, 12))
+        micro(settings.body, "CONNECTION").pack(fill="x", pady=(0, 12))
 
         form = tk.Frame(settings.body, bg=SURFACE)
         form.pack(fill="x")
         form.grid_columnconfigure(1, weight=1)
-        label(form, "COM port", size=8, fg=MUTED, bg=SURFACE).grid(
-            row=0, column=0, sticky="w", pady=3)
+        micro(form, "COM PORT", fg=FAINT, tracking=1.8, weight="normal").grid(
+            row=0, column=0, sticky="w", pady=(0, 2))
         self.port_var = tk.StringVar()
         port_row = tk.Frame(form, bg=SURFACE)
-        port_row.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=3)
-        self.port_box = ttk.Combobox(port_row, textvariable=self.port_var, width=12)
+        port_row.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=(0, 8))
+        self.port_box = ttk.Combobox(port_row, textvariable=self.port_var, width=10)
         self.port_box.pack(side="left", fill="x", expand=True)
         ttk.Button(port_row, text="Refresh", style="Small.TButton",
                    command=self.refresh_ports).pack(side="left", padx=(6, 0))
 
-        label(form, "Baud rate", size=8, fg=MUTED, bg=SURFACE).grid(
-            row=1, column=0, sticky="w", pady=3)
+        micro(form, "BAUD RATE", fg=FAINT, tracking=1.8, weight="normal").grid(
+            row=2, column=0, sticky="w", pady=(0, 2))
         self.baud_var = tk.StringVar(value="auto")
         ttk.Combobox(form, textvariable=self.baud_var, width=12,
                      values=["auto", "38400", "9600", "115200", "230400"]).grid(
-                         row=1, column=1, sticky="w", padx=(10, 0), pady=3)
+                         row=3, column=1, sticky="w", padx=(12, 0))
 
         self.demo_var = tk.BooleanVar(value=self.client.demo)
-        Toggle(settings.body, "Demo mode — explore without a car",
-               self.demo_var, command=self._on_demo_toggle).pack(anchor="w", pady=(12, 0))
-        divider(settings.body).pack(fill="x", pady=12)
+        Toggle(settings.body, "Demo mode",
+               self.demo_var, command=self._on_demo_toggle).pack(
+                   anchor="w", pady=(18, 0))
+        divider(settings.body).pack(fill="x", pady=16)
         ttk.Button(settings.body, text="Connect & detect vehicle",
                    style="Accent.TButton", command=self.on_connect_detect).pack(
                        fill="x")
-        label(settings.body, "Ignition ON for codes · engine running for live data.",
-              size=8, fg=FAINT, bg=SURFACE).pack(fill="x", pady=(10, 0))
 
         # -- vehicle identity ---------------------------------------------
-        identity = Card(page, padding=16)
+        identity = Card(page, padding=18)
         identity.grid(row=1, column=1, sticky="nsew", pady=(12, 0), padx=(6, 0))
-        label(identity.body, "VEHICLE IDENTITY", size=7, weight="bold",
-              fg=FAINT, bg=SURFACE).pack(fill="x")
-        label(identity.body, "Everything the app knows about this car.",
-              size=12, weight="bold", bg=SURFACE).pack(fill="x", pady=(1, 0))
-        label(identity.body, "Decoded from the VIN; edit below if it can't be read.",
-              size=8, fg=MUTED, bg=SURFACE).pack(fill="x", pady=(1, 12))
+        micro(identity.body, "VEHICLE IDENTITY").pack(fill="x", pady=(0, 12))
 
         self.home_vars = {}
-        label(identity.body, "VIN", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x")
+        micro(identity.body, "VIN", fg=FAINT, tracking=1.8,
+              weight="normal").pack(fill="x")
         self.home_vars["vin"] = tk.StringVar(value="--")
-        label(identity.body, "", size=10, fg=TEXT, bg=SURFACE,
-              family="Consolas", textvariable=self.home_vars["vin"],
-              wraplength=470).pack(fill="x", pady=(1, 8))
+        label(identity.body, "", size=TYPE["body"], fg=INK, bg=SURFACE,
+              family=MONO, textvariable=self.home_vars["vin"],
+              wraplength=470).pack(fill="x", pady=(3, 12))
 
         pairs = tk.Frame(identity.body, bg=SURFACE)
-        pairs.pack(fill="x", pady=(0, 8))
+        pairs.pack(fill="x", pady=(0, 12))
         for index, (key, title) in enumerate((("conn", "STATUS"),
                                               ("profile", "PROFILE"))):
             cell = tk.Frame(pairs, bg=SURFACE)
             cell.grid(row=0, column=index, sticky="w",
                       padx=(0, 28 if index == 0 else 0))
             pairs.grid_columnconfigure(index, weight=1, uniform="pair")
-            label(cell, title, size=7, weight="bold", fg=FAINT,
-                  bg=SURFACE).pack(fill="x")
+            micro(cell, title, fg=FAINT, tracking=1.8,
+                  weight="normal").pack(fill="x")
             var = tk.StringVar(value="--")
             self.home_vars[key] = var
-            label(cell, "", size=9, fg=MUTED, bg=SURFACE,
-                  textvariable=var).pack(fill="x", pady=(1, 0))
+            label(cell, "", size=TYPE["small"], fg=MUTED, bg=SURFACE,
+                  textvariable=var).pack(fill="x", pady=(2, 0))
 
-        label(identity.body, "ABS PATH", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x")
+        micro(identity.body, "ABS PATH", fg=FAINT, tracking=1.8,
+              weight="normal").pack(fill="x")
         self.home_vars["abs"] = tk.StringVar(value="--")
-        label(identity.body, "", size=9, fg=MUTED, bg=SURFACE,
+        label(identity.body, "", size=TYPE["small"], fg=MUTED, bg=SURFACE,
               textvariable=self.home_vars["abs"], wraplength=470).pack(
-                  fill="x", pady=(1, 8))
+                  fill="x", pady=(3, 10))
 
-        divider(identity.body).pack(fill="x", pady=(0, 10))
-        label(identity.body, "IDENTIFY THE CAR", size=7, weight="bold",
-              fg=FAINT, bg=SURFACE).pack(fill="x", pady=(0, 4))
+        divider(identity.body).pack(fill="x", pady=(0, 12))
+        micro(identity.body, "IDENTIFY THE CAR").pack(fill="x", pady=(0, 6))
         picker = tk.Frame(identity.body, bg=SURFACE)
         picker.pack(fill="x")
         for col, text in enumerate(("MAKE", "YEAR", "MODEL")):
-            label(picker, text, size=7, weight="bold", fg=FAINT,
-                  bg=SURFACE).grid(row=0, column=col, sticky="w", padx=(0, 8))
+            micro(picker, text, fg=FAINT, tracking=1.8,
+                  weight="normal").grid(row=0, column=col, sticky="w",
+                                        padx=(0, 8), pady=(0, 3))
         self.make_var = tk.StringVar(value="")
         self.make_box = ttk.Combobox(picker, textvariable=self.make_var,
                                      width=12, state="readonly",
@@ -369,43 +435,20 @@ class App(tk.Tk):
         self.make_box.grid(row=1, column=0, sticky="w", padx=(0, 8))
         self.make_box.bind("<<ComboboxSelected>>", lambda _e: self.on_make_pick())
         self.year_var = tk.StringVar(value="")
-        ttk.Entry(picker, textvariable=self.year_var, width=7).grid(
+        ttk.Entry(picker, textvariable=self.year_var, width=5).grid(
             row=1, column=1, sticky="w", padx=(0, 8))
         self.model_var = tk.StringVar(value="")
         self.model_box = ttk.Combobox(picker, textvariable=self.model_var,
-                                      width=17, state="readonly")
+                                      width=12, state="readonly")
         self.model_box.grid(row=1, column=2, sticky="w", padx=(0, 8))
         self.model_box.bind("<<ComboboxSelected>>", lambda _e: self.on_model_pick())
         ttk.Button(picker, text="Set", style="Small.TButton",
                    command=self.on_manual_vehicle).grid(row=1, column=3, sticky="w")
 
-        # -- first-run tips ----------------------------------------------
-        tips = Card(page, padding=10)
-        tips.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
-        cols = tk.Frame(tips.body, bg=SURFACE)
-        cols.pack(fill="both", expand=True)
-        for index, (title, body) in enumerate((
-                ("Bluetooth first",
-                 "Pair in Windows Settings so it exposes a COM port. COM3 may "
-                 "refuse — try COM4 or Auto."),
-                ("Ignition state",
-                 "Key ON, engine OFF for stored codes. Run the engine for live "
-                 "data and monitor tests."),
-                ("Nothing to lose",
-                 "Tick Demo to explore every screen. Real sessions save their "
-                 "logs automatically."))):
-            col = tk.Frame(cols, bg=SURFACE)
-            col.grid(row=0, column=index, sticky="nsew", padx=(0, 24 if index < 2 else 0))
-            cols.grid_columnconfigure(index, weight=1, uniform="tips")
-            label(col, title, size=9, weight="bold", bg=SURFACE).pack(fill="x")
-            label(col, body, size=8, fg=MUTED, bg=SURFACE,
-                  wraplength=250).pack(fill="x", pady=(3, 0))
-
     # ================= Engine page =================
     def _build_obd_tab(self):
-        page = tk.Frame(self.stack, bg=BG)
-        self.tab_obd = page
-        self.stack.add(page, "Engine & live data", "Stored codes, monitor tests, and realtime PIDs.")
+        host, page = self._page("Engine")
+        self.tab_obd = host
         page.grid_columnconfigure(0, weight=1)
         page.grid_rowconfigure(2, weight=3)
         page.grid_rowconfigure(3, weight=2)
@@ -425,16 +468,17 @@ class App(tk.Tk):
         for text, style, command in actions:
             ttk.Button(bar, text=text, style=style, command=command).pack(
                 side="left", padx=(0, 6))
-        self.dtc_status = label(bar, "", size=8, fg=MUTED, bg=SURFACE)
+        self.dtc_status = label(bar, "", size=TYPE["micro"], fg=MUTED,
+                                bg=SURFACE, family=MONO)
         self.dtc_status.pack(side="right", padx=(12, 4))
 
         gauges = tk.Frame(page, bg=BG)
         gauges.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         tiles = (
-            ("Engine RPM", "rpm", 0, 6000, RED, "g_rpm"),
-            ("Vehicle speed", "km/h", 0, 200, BLUE, "g_spd"),
-            ("Coolant", "°C", 50, 120, AMBER, "g_clt"),
-            ("Engine load", "%", 0, 100, GREEN, "g_ld"),
+            ("Engine RPM", "rpm", 0, 6000, ACCENT, "g_rpm"),
+            ("Vehicle speed", "km/h", 0, 200, LIVE, "g_spd"),
+            ("Coolant", "°C", 50, 120, ACCENT_RICH, "g_clt"),
+            ("Engine load", "%", 0, 100, LIVE_TEXT, "g_ld"),
         )
         for col, (title, unit, vmin, vmax, color, attr) in enumerate(tiles):
             gauges.grid_columnconfigure(col, weight=1, uniform="gauges")
@@ -450,12 +494,14 @@ class App(tk.Tk):
         charts.grid_columnconfigure(1, weight=2)
         self.chart_drive = TrendChart(
             charts, "Engine speed vs vehicle speed",
-            [("RPM (rpm)", RED), ("Speed (km/h)", BLUE)], vmin=0, vmax=6000)
+            [("RPM (rpm)", "RPM", ACCENT), ("Speed (km/h)", "Speed", LIVE)],
+            vmin=0, vmax=6000, height=112)
         self.chart_drive.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         self.chart_fuel = TrendChart(
             charts, "Fuel trims — bank 1",
-            [("STFT B1 (%)", "#a78bfa"), ("LTFT B1 (%)", "#22d3ee")],
-            vmin=-10, vmax=10, height=110)
+            [("STFT B1 (%)", "STFT", LIVE_PALE),
+             ("LTFT B1 (%)", "LTFT", ACCENT_RICH)],
+            vmin=-10, vmax=10, height=96)
         self.chart_fuel.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
 
         tables = tk.Frame(page, bg=BG)
@@ -464,34 +510,33 @@ class App(tk.Tk):
         tables.grid_columnconfigure(0, weight=3)
         tables.grid_columnconfigure(1, weight=2)
 
-        codes = Card(tables, padding=12)
+        codes = Card(tables, padding=14)
         codes.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        label(codes.body, "FAULT CODES", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x", pady=(0, 6))
+        micro(codes.body, "FAULT CODES").pack(fill="x", pady=(0, 8))
         self.dtc_tree = self._tree(codes.body, "Code", "Description",
-                                   (100, 380), 4)
+                                   (100, 380), 3)
         self.dtc_tree.pack(fill="both", expand=True)
 
-        live = Card(tables, padding=12)
+        live = Card(tables, padding=14)
         live.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
-        label(live.body, "LIVE PIDS", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x", pady=(0, 6))
-        self.mon_tree = self._tree(live.body, "PID", "Value", (180, 100), 4)
+        micro(live.body, "LIVE PIDS").pack(fill="x", pady=(0, 8))
+        self.mon_tree = self._tree(live.body, "PID", "Value", (180, 100), 3)
         self.mon_tree.pack(fill="both", expand=True)
 
         controls = Card(page, padding=10)
         controls.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         cbar = tk.Frame(controls.body, bg=SURFACE)
         cbar.pack(fill="x")
-        label(cbar, "REALTIME", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(side="left", padx=(2, 10))
-        label(cbar, "Interval (s)", size=8, fg=MUTED, bg=SURFACE).pack(side="left")
+        micro(cbar, "REALTIME").pack(side="left", padx=(2, 12))
+        label(cbar, "Interval (s)", size=TYPE["micro"], fg=MUTED, bg=SURFACE,
+              family=MONO).pack(side="left")
         self.interval_var = tk.StringVar(value="0.5")
         ttk.Spinbox(cbar, textvariable=self.interval_var, from_=0.3, to=10,
-                    increment=0.5, width=5).pack(side="left", padx=(6, 14))
-        label(cbar, "CSV log", size=8, fg=MUTED, bg=SURFACE).pack(side="left")
+                    increment=0.5, width=5).pack(side="left", padx=(6, 16))
+        label(cbar, "CSV log", size=TYPE["micro"], fg=MUTED, bg=SURFACE,
+              family=MONO).pack(side="left")
         self.csv_var = tk.StringVar(value="")
-        ttk.Entry(cbar, textvariable=self.csv_var, width=18).pack(
+        ttk.Entry(cbar, textvariable=self.csv_var, width=14).pack(
             side="left", padx=(6, 6))
         ttk.Button(cbar, text="Browse", style="Small.TButton",
                    command=self.on_browse_csv).pack(side="left")
@@ -499,33 +544,22 @@ class App(tk.Tk):
                                    style="Accent.TButton",
                                    command=self.on_monitor_toggle)
         self.btn_dash.pack(side="right")
-        self.dash_status = label(cbar, "Stopped", size=8, fg=MUTED, bg=SURFACE)
-        self.dash_status.pack(side="right", padx=(0, 12))
+        self.dash_status = label(cbar, "Stopped", size=TYPE["micro"], fg=MUTED,
+                                 bg=SURFACE, family=MONO)
+        self.dash_status.pack(side="right", padx=(0, 14))
 
     # ================= ABS page =================
     def _build_abs_tab(self):
-        page = tk.Frame(self.stack, bg=BG)
-        self.tab_abs = page
-        self.stack.add(page, "ABS / chassis", "Reads C-codes and probes the skid-control ECU directly.")
+        host, page = self._page("ABS")
+        self.tab_abs = host
         page.grid_columnconfigure(0, weight=1)
         page.grid_rowconfigure(2, weight=1)
 
-        info = Card(page, padding=16)
+        info = Card(page, padding=16, seam=True)
         info.grid(row=0, column=0, sticky="ew")
-        label(info.body, "SKID CONTROL ECU", size=7, weight="bold", fg=ACCENT,
-              bg=SURFACE).pack(fill="x")
-        label(info.body, "ABS and chassis faults", size=15, weight="bold",
-              bg=SURFACE, family="Segoe UI Semibold").pack(fill="x", pady=(1, 3))
-        label(info.body, "Reads C-codes through generic OBD (Modes 03 / 07 / 0A) and "
-                         "can address the ABS module directly. Every probe reports "
-                         "exactly what the ECU said — data, a rejection, or silence.",
-              size=9, fg=MUTED, bg=SURFACE, wraplength=1000).pack(fill="x")
-        chips = tk.Frame(info.body, bg=SURFACE)
-        chips.pack(fill="x", pady=(12, 0))
-        for text in ("READ-ONLY READS", "MODES 03 / 07 / 0A", "DIRECT PROBE"):
-            chip(chips, text).pack(side="left", padx=(0, 8))
+        micro(info.body, "SKID CONTROL ECU", fg=ACCENT).pack(fill="x")
 
-        actions = Card(page, padding=8)
+        actions = Card(page, padding=10)
         actions.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         abar = tk.Frame(actions.body, bg=SURFACE)
         abar.pack(fill="x")
@@ -535,7 +569,8 @@ class App(tk.Tk):
                    command=self.on_abs_probe).pack(side="left", padx=(0, 6))
         ttk.Button(abar, text="Clear ABS codes", style="Danger.TButton",
                    command=self.on_abs_clear).pack(side="left")
-        self.abs_status = label(abar, "", size=8, fg=MUTED, bg=SURFACE)
+        self.abs_status = label(abar, "", size=TYPE["micro"], fg=MUTED,
+                                bg=SURFACE, family=MONO)
         self.abs_status.pack(side="right", padx=(12, 4))
 
         split = tk.Frame(page, bg=BG)
@@ -544,12 +579,11 @@ class App(tk.Tk):
         split.grid_columnconfigure(0, weight=3)
         split.grid_columnconfigure(1, weight=2)
 
-        codes = Card(split, padding=12)
+        codes = Card(split, padding=14)
         codes.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        label(codes.body, "ABS CODES", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x", pady=(0, 6))
+        micro(codes.body, "ABS CODES").pack(fill="x", pady=(0, 8))
         self.abs_tree = self._tree(codes.body, "Code", "Description",
-                                   (100, 380), 8)
+                                   (90, 340), 8)
         self.abs_tree.pack(fill="both", expand=True)
 
         right = tk.Frame(split, bg=BG)
@@ -557,123 +591,95 @@ class App(tk.Tk):
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(1, weight=1)
 
-        guide = Card(right, padding=14)
+        guide = Card(right, padding=16)
         guide.grid(row=0, column=0, sticky="ew")
-        label(guide.body, "HOW TO READ A PROBE", size=7, weight="bold",
-              fg=FAINT, bg=SURFACE).pack(fill="x", pady=(0, 8))
-        for tag, color, text in (
-                ("DATA", GREEN, "The module answered the service you asked for."),
-                ("REJECTION", AMBER, "It replied with an NRC — alive, but refusing "
-                                     "that service. Try another session/header."),
-                ("SILENCE", RED, "No reply: wrong header, wrong protocol, or the "
-                                 "module is off the bus.")):
+        micro(guide.body, "PROBE RESULTS").pack(fill="x", pady=(0, 8))
+        for text, color, body in (
+                ("DATA", LIVE, "Module answered."),
+                ("REJECTION", ACCENT_RICH, "Refused — try another header."),
+                ("SILENCE", DANGER_TEXT, "No reply — check header or protocol.")):
             row = tk.Frame(guide.body, bg=SURFACE)
             row.pack(fill="x", pady=2)
-            label(row, tag, size=7, weight="bold", fg=color, bg=SURFACE,
-                  width=10).pack(side="left", anchor="n")
-            label(row, text, size=8, fg=MUTED, bg=SURFACE, wraplength=290).pack(
-                side="left", fill="x", expand=True)
-        label(guide.body, "Older vehicles: if every service is refused, many makes "
-                          "offer a blink-code/jumper procedure at the diagnostic "
-                          "connector — see your service manual.",
-              size=8, fg=FAINT, bg=SURFACE, wraplength=320).pack(
-                  fill="x", pady=(6, 0))
+            label(row, text, size=TYPE["micro"], weight="bold", fg=color,
+                  bg=SURFACE, family=MONO, width=10).pack(side="left", anchor="n")
+            label(row, body, size=TYPE["micro"], fg=MUTED, bg=SURFACE,
+                  wraplength=280).pack(side="left", fill="x", expand=True)
 
-        advanced = Card(right, padding=8)
+        advanced = Card(right, padding=14)
         advanced.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
-        label(advanced.body, "RAW QUERY · HEADER + COMMAND", size=7, weight="bold",
-              fg=FAINT, bg=SURFACE).pack(fill="x", pady=(0, 6))
+        micro(advanced.body, "RAW QUERY · HEADER + COMMAND").pack(
+            fill="x", pady=(0, 8))
         fields = tk.Frame(advanced.body, bg=SURFACE)
         fields.pack(fill="x")
-        label(fields, "Header", size=8, fg=MUTED, bg=SURFACE).grid(
-            row=0, column=0, sticky="w")
+        micro(fields, "HEADER", fg=FAINT, tracking=1.8,
+              weight="normal").grid(row=0, column=0, sticky="w")
         self.abs_hdr_var = tk.StringVar(value="")
         ttk.Entry(fields, textvariable=self.abs_hdr_var, width=7).grid(
-            row=1, column=0, sticky="w", padx=(0, 8), pady=(2, 0))
-        label(fields, "Command", size=8, fg=MUTED, bg=SURFACE).grid(
-            row=0, column=1, sticky="w")
+            row=1, column=0, sticky="w", padx=(0, 8), pady=(3, 0))
+        micro(fields, "COMMAND", fg=FAINT, tracking=1.8,
+              weight="normal").grid(row=0, column=1, sticky="w")
         self.abs_cmd_var = tk.StringVar(value="19 02 FF")
         ttk.Entry(fields, textvariable=self.abs_cmd_var, width=14).grid(
-            row=1, column=1, sticky="w", padx=(0, 8), pady=(2, 0))
+            row=1, column=1, sticky="w", padx=(0, 8), pady=(3, 0))
         ttk.Button(fields, text="Send", style="Ghost.TButton",
                    command=self.on_abs_raw).grid(row=1, column=2, sticky="w",
-                                                 pady=(2, 0))
+                                                 pady=(3, 0))
 
     # ================= I/M page =================
     def _build_im_tab(self):
-        page = tk.Frame(self.stack, bg=BG)
-        self.tab_im = page
-        self.stack.add(page, "I/M readiness", "Monitor completion status before an emissions test.")
+        host, page = self._page("I/M Readiness")
+        self.tab_im = host
         page.grid_columnconfigure(0, weight=3)
         page.grid_columnconfigure(1, weight=2)
         page.grid_rowconfigure(1, weight=1)
 
-        banner = Card(page, padding=16)
+        banner = Card(page, padding=20, seam=True)
         banner.grid(row=0, column=0, columnspan=2, sticky="ew")
-        label(banner.body, "EMISSIONS READINESS", size=7, weight="bold",
-              fg=ACCENT, bg=SURFACE).pack(fill="x")
+        micro(banner.body, "EMISSIONS READINESS", fg=ACCENT).pack(fill="x")
         brow = tk.Frame(banner.body, bg=SURFACE)
         brow.pack(fill="x", pady=(4, 0))
-        self.im_status = label(brow, "Not checked yet", size=16, weight="bold",
-                               bg=SURFACE, family="Segoe UI Semibold")
+        self.im_status = label(brow, "Not checked yet", size=TYPE["display"],
+                               fg=INK, bg=SURFACE,
+                               family=DISPLAY_FONT)
         self.im_status.pack(side="left")
         ttk.Button(brow, text="Refresh readiness", style="Accent.TButton",
                    command=self.on_im).pack(side="right")
-        label(banner.body, "Mode 01 PID 01 — monitor completion since the last "
-                           "code clear. A recent clear resets every monitor.",
-              size=8, fg=MUTED, bg=SURFACE).pack(fill="x", pady=(4, 0))
 
-        monitors = Card(page, padding=12)
+        monitors = Card(page, padding=14)
         monitors.grid(row=1, column=0, sticky="nsew", pady=(10, 0), padx=(0, 5))
-        label(monitors.body, "MONITORS", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x", pady=(0, 6))
+        micro(monitors.body, "MONITORS").pack(fill="x", pady=(0, 8))
         self.im_tree = self._tree(monitors.body, "Monitor", "Status",
                                   (280, 200), 10)
         self.im_tree.pack(fill="both", expand=True)
 
-        meaning = Card(page, padding=16)
+        meaning = Card(page, padding=20)
         meaning.grid(row=1, column=1, sticky="nsew", pady=(10, 0), padx=(5, 0))
-        label(meaning.body, "WHAT THIS MEANS", size=7, weight="bold",
-              fg=FAINT, bg=SURFACE).pack(fill="x", pady=(0, 10))
+        micro(meaning.body, "LEGEND").pack(fill="x", pady=(0, 12))
         for color, title, text in (
-                (GREEN, "Complete", "The monitor ran its test since the last clear."),
-                (AMBER, "Incomplete", "Not enough drive time for this monitor — "
-                                      "no fault implied, just unfinished."),
-                (FAINT, "N/A", "Not fitted to this vehicle.")):
-            label(meaning.body, title, size=10, weight="bold", fg=color,
+                (LIVE, "Complete", "Tested since the last clear."),
+                (ACCENT_RICH, "Incomplete", "Not enough drive time."),
+                (MUTE_DEEP, "N/A", "Not fitted.")):
+            label(meaning.body, title, size=TYPE["small"], weight="bold", fg=color,
                   bg=SURFACE).pack(fill="x")
-            label(meaning.body, text, size=8, fg=MUTED, bg=SURFACE,
-                  wraplength=300).pack(fill="x", pady=(0, 10))
-        divider(meaning.body).pack(fill="x", pady=(2, 10))
-        label(meaning.body, "For a test, readiness must be Complete — or the car "
-                            "may be exempt depending on your region's rules.",
-              size=8, fg=FAINT, bg=SURFACE, wraplength=300).pack(fill="x")
+            label(meaning.body, text, size=TYPE["micro"], fg=MUTED, bg=SURFACE,
+                  wraplength=300).pack(fill="x", pady=(2, 12))
 
     # ================= TPMS page =================
     def _build_tpms_tab(self):
-        page = tk.Frame(self.stack, bg=BG)
-        self.tab_tpms = page
-        self.stack.add(page, "TPMS", "Sensor faults, per-corner pressures, and ID writes.")
+        host, page = self._page("TPMS")
+        self.tab_tpms = host
         page.grid_columnconfigure(0, weight=1)
         page.grid_rowconfigure(3, weight=1)
 
-        info = Card(page, padding=12)
+        info = Card(page, padding=16, seam=True)
         info.grid(row=0, column=0, sticky="ew")
         irow = tk.Frame(info.body, bg=SURFACE)
         irow.pack(fill="x")
-        label(irow, "TIRE PRESSURE MONITORING", size=7, weight="bold",
-              fg=ACCENT, bg=SURFACE).pack(side="left")
-        chips = tk.Frame(irow, bg=SURFACE)
-        chips.pack(side="right")
-        for text in ("FAULT CODES", "LIVE PRESSURES", "ID WRITES"):
-            chip(chips, text).pack(side="left", padx=(6, 0))
-        label(info.body, "Fault codes read through OBD on many cars. Per-corner "
-                         "pressures need your model's documented PID; target "
-                         "pressures are on the door jamb.",
-              size=8, fg=MUTED, bg=SURFACE, wraplength=920).pack(
-                  fill="x", pady=(4, 0))
+        micro(irow, "TIRE PRESSURE MONITORING", fg=ACCENT).pack(side="left")
+        label(irow, "Live pressures need a documented PID.",
+              size=TYPE["small"], fg=MUTED, bg=SURFACE).pack(side="right")
 
-        actions = Card(page, padding=8)
+        actions = Card(page, padding=10)
         actions.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         abar = tk.Frame(actions.body, bg=SURFACE)
         abar.pack(fill="x")
@@ -681,7 +687,8 @@ class App(tk.Tk):
                    command=self.on_tpms_read).pack(side="left", padx=(0, 6))
         ttk.Button(abar, text="Live pressures", style="Ghost.TButton",
                    command=self.on_tpms_live).pack(side="left")
-        self.tpms_status = label(abar, "", size=8, fg=MUTED, bg=SURFACE)
+        self.tpms_status = label(abar, "", size=TYPE["micro"], fg=MUTED,
+                                 bg=SURFACE, family=MONO)
         self.tpms_status.pack(side="right", padx=(12, 4))
 
         tiles = tk.Frame(page, bg=BG)
@@ -691,19 +698,20 @@ class App(tk.Tk):
                    ("RL (psi)", "REAR LEFT"), ("RR (psi)", "REAR RIGHT"))
         for col, (key, title) in enumerate(corners):
             tiles.grid_columnconfigure(col, weight=1, uniform="tires")
-            tile = Card(tiles, padding=10)
+            tile = Card(tiles, padding=14)
             tile.grid(row=0, column=col, sticky="nsew",
                       padx=(0 if col == 0 else 4, 0 if col == 3 else 4))
-            label(tile.body, title, size=7, weight="bold", fg=FAINT,
-                  bg=SURFACE).pack(fill="x")
+            micro(tile.body, title, fg=FAINT, tracking=2.0).pack(fill="x")
             row = tk.Frame(tile.body, bg=SURFACE)
-            row.pack(fill="x", pady=(2, 0))
+            row.pack(fill="x", pady=(3, 0))
             var = tk.StringVar(value="--")
             self.tpms_gauges[key] = var
-            label(row, "", size=22, weight="bold", bg=SURFACE,
-                  family="Segoe UI Semibold", textvariable=var).pack(side="left")
-            label(row, "psi", size=8, fg=FAINT, bg=SURFACE).pack(
-                side="left", padx=(5, 0), pady=(0, 5), anchor="s")
+            label(row, "", size=TYPE["display"], bg=SURFACE, fg=INK,
+                  family=DISPLAY_FONT,
+                  textvariable=var).pack(side="left")
+            label(row, "psi", size=TYPE["micro"], fg=FAINT, bg=SURFACE,
+                  family=MONO).pack(side="left", padx=(6, 0), pady=(0, 8),
+                                     anchor="s")
 
         split = tk.Frame(page, bg=BG)
         split.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
@@ -711,24 +719,19 @@ class App(tk.Tk):
         for col, weight in ((0, 3), (1, 2), (2, 2)):
             split.grid_columnconfigure(col, weight=weight)
 
-        codes = Card(split, padding=12)
+        codes = Card(split, padding=14)
         codes.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        label(codes.body, "TPMS CODES", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x", pady=(0, 6))
+        micro(codes.body, "TPMS CODES").pack(fill="x", pady=(0, 8))
         self.tpms_tree = self._tree(codes.body, "Code", "Description",
-                                    (100, 260), 6)
+                                    (80, 200), 6)
         self.tpms_tree.pack(fill="both", expand=True)
 
-        register = Card(split, padding=12)
+        register = Card(split, padding=14)
         register.grid(row=0, column=1, sticky="nsew", padx=5)
-        label(register.body, "SENSOR IDS", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x")
-        label(register.body, "Write sensor IDs", size=11, weight="bold",
-              bg=SURFACE).pack(fill="x", pady=(1, 2))
-        label(register.body, "7–8 hex digits each. Needs a verified preset for "
-                             "your model — otherwise it refuses.",
-              size=8, fg=MUTED, bg=SURFACE, wraplength=230).pack(
-                  fill="x", pady=(0, 8))
+        micro(register.body, "SENSOR IDS").pack(fill="x")
+        label(register.body, "7–8 hex digits · verified preset required.",
+              size=TYPE["micro"], fg=MUTED, bg=SURFACE, wraplength=230).pack(
+                  fill="x", pady=(4, 10))
         self.tpms_id_vars = {}
         id_grid = tk.Frame(register.body, bg=SURFACE)
         id_grid.pack(fill="x")
@@ -736,33 +739,32 @@ class App(tk.Tk):
             row, col = divmod(index, 2)
             cell = tk.Frame(id_grid, bg=SURFACE)
             cell.grid(row=row, column=col, sticky="w", padx=(0, 8), pady=3)
-            label(cell, corner, size=8, fg=MUTED, bg=SURFACE,
-                  width=3).pack(side="left")
+            micro(cell, corner, fg=FAINT, tracking=1.6,
+                  weight="normal").pack(side="left", padx=(0, 6))
             var = tk.StringVar(value="")
             self.tpms_id_vars[corner] = var
             ttk.Entry(cell, textvariable=var, width=9).pack(side="left")
         ttk.Button(register.body, text="Register IDs", style="Ghost.TButton",
-                   command=self.on_tpms_register).pack(fill="x", pady=(10, 0))
+                   command=self.on_tpms_register).pack(fill="x", pady=(12, 0))
 
-        raw = Card(split, padding=12)
+        raw = Card(split, padding=14)
         raw.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
-        label(raw.body, "RAW MODULE QUERY", size=7, weight="bold", fg=FAINT,
-              bg=SURFACE).pack(fill="x")
-        label(raw.body, "Needs your model's PID, e.g. 22 F411.",
-              size=8, fg=MUTED, bg=SURFACE, wraplength=240).pack(
-                  fill="x", pady=(3, 0))
-        label(raw.body, "Header", size=8, fg=MUTED, bg=SURFACE).pack(
-            fill="x", pady=(8, 2))
+        micro(raw.body, "RAW MODULE QUERY").pack(fill="x")
+        label(raw.body, "Your model's PID, e.g. 22 F411.",
+              size=TYPE["micro"], fg=MUTED, bg=SURFACE, wraplength=240).pack(
+                  fill="x", pady=(4, 0))
+        micro(raw.body, "HEADER", fg=FAINT, tracking=1.8,
+              weight="normal").pack(fill="x", pady=(10, 3))
         self.tpms_hdr_var = tk.StringVar(value="")
         ttk.Entry(raw.body, textvariable=self.tpms_hdr_var,
                   width=8).pack(fill="x")
-        label(raw.body, "Command", size=8, fg=MUTED, bg=SURFACE).pack(
-            fill="x", pady=(8, 2))
+        micro(raw.body, "COMMAND", fg=FAINT, tracking=1.8,
+              weight="normal").pack(fill="x", pady=(10, 3))
         self.tpms_cmd_var = tk.StringVar(value="22 ")
         ttk.Entry(raw.body, textvariable=self.tpms_cmd_var,
                   width=12).pack(fill="x")
         ttk.Button(raw.body, text="Send", style="Ghost.TButton",
-                   command=self.on_tpms_raw).pack(fill="x", pady=(10, 0))
+                   command=self.on_tpms_raw).pack(fill="x", pady=(12, 0))
 
     # ================= shared builders =================
     def _tree(self, parent, first: str, second: str, widths: tuple[int, int],
@@ -793,7 +795,6 @@ class App(tk.Tk):
         to the .exe instead. __file__ inside a one-file bundle points at
         a temp dir, so sys.executable is used there.
         """
-        import sys
         if getattr(sys, "frozen", False):
             root = Path(sys.executable).resolve().parent
         else:
@@ -988,7 +989,7 @@ class App(tk.Tk):
                 msg = self.client.connect(port=port, baudrate=baud)
             self.write(msg + "\n")
             self._connected = True
-            self._set_conn_label("● Connected", "green")
+            self._set_conn_label("Connected", "green")
             self.call_ui(self._refresh_demo_badge)
             self.call_ui(self._refresh_vehicle)
             return True
@@ -1122,9 +1123,8 @@ class App(tk.Tk):
         self.chart_fuel.draw(self.history)
         rate = (1.0 / dt) if dt > 0 else 0
         self.dash_status.config(
-            text=f"Sample #{n}  ·  {rate:.1f}/s  ·  "
-                 f"{sample.get('RPM (rpm)')} rpm  ·  "
-                 f"{sample.get('Speed (km/h)')} km/h")
+            text=f"#{n}  ·  {rate:.1f}/s  ·  "
+                 f"{sample.get('RPM (rpm)')} rpm")
         for i in self.mon_tree.get_children():
             self.mon_tree.delete(i)
         for k, v in sample.items():

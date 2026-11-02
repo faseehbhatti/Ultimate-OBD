@@ -16,7 +16,9 @@ common_kwargs = dict(
     # src/ must be importable so `features.*` resolves at analysis time.
     pathex=[os.path.join(ROOT, "src")],
     binaries=[],
-    datas=[],
+    # The GUI bundles its OFL faces (Inter / JetBrains Mono) plus their
+    # licenses; ui.theme registers them per-process at startup.
+    datas=[(os.path.join(ROOT, "src", "ui", "fonts"), os.path.join("ui", "fonts"))],
     # Insurance: pyserial's port scanner and pint (via python-OBD) have both
     # been seen missed by analysis in some environments.
     hiddenimports=["serial.tools.list_ports", "pint"],
